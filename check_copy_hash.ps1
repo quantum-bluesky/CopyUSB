@@ -18,8 +18,38 @@
 
     # Hiển thị hướng dẫn
     [switch]$h,
-    [switch]$Help
+    [switch]$Help,
+
+    # Không hỏi confirm config
+    [switch]$NoConfirm,
+
+    # Không pause cuối cùng (dùng khi gọi từ master)
+    [switch]$NoPause,
+
+    # Ghi log vào file (nếu có)
+    [string]$LogFile
 )
+
+# ---------- HÀM LOG ----------
+function Write-Log {
+    param(
+        [string]$Message,
+        [string]$Level = "INFO"
+    )
+    $timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    $line = "[{0}] [CHECK] [{1}] {2}" -f $timestamp, $Level.ToUpper(), $Message
+
+    switch ($Level.ToUpper()) {
+        "ERROR" { Write-Host $line -ForegroundColor Red }
+        "WARN"  { Write-Host $line -ForegroundColor Yellow }
+        "INFO"  { Write-Host $line -ForegroundColor Gray }
+        default { Write-Host $line }
+    }
+
+    if ($LogFile) {
+        Add-Content -Path $LogFile -Value $line
+    }
+}
 
 function Show-Help {
     $scriptName = if ($PSCommandPath) { Split-Path $PSCommandPath -Leaf } else { "check_copy_symlink_hash.ps1" }
@@ -29,7 +59,7 @@ function Show-Help {
     Write-Host "Kiểm tra thư mục copy (chỉ file .mp3), có hỗ trợ symlink/junction, chạy song song." -ForegroundColor Gray
     Write-Host ""
     Write-Host "Cú pháp cơ bản:" -ForegroundColor Yellow
-    Write-Host "  .\${scriptName}" -ForegroundColor White
+    Write-Host "  .\${scriptName}"
     Write-Host ""
     Write-Host "Tham số:" -ForegroundColor Yellow
     Write-Host "  -SourceRoot  <path>      : Thư mục nguồn. Mặc định: .\A Di Da Phat"
@@ -39,39 +69,52 @@ function Show-Help {
     Write-Host "                             =0  → hash toàn bộ file chung."
     Write-Host "                             >0  → chỉ hash N file cuối cùng."
     Write-Host "  -HashAlgorithm MD5|SHA256: Thuật toán hash (mặc định MD5)."
+    Write-Host "  -NoConfirm               : Không hỏi lại cấu hình."
+    Write-Host "  -NoPause                 : Không chờ Enter cuối script."
+    Write-Host "  -LogFile     <path>      : Ghi log vào file chỉ định."
     Write-Host "  -h / -Help               : Hiển thị hướng dẫn này."
     Write-Host ""
     Write-Host "Ví dụ:" -ForegroundColor Yellow
-    Write-Host "  # Check nhanh, không hash:"
-    Write-Host "  .\${scriptName}"
-    Write-Host ""
-    Write-Host "  # Check nguồn D:\A Di Da Phat, 3 ổ F,G,H, hash toàn bộ:"
-    Write-Host "  .\${scriptName} -SourceRoot 'D:\A Di Da Phat' -DestDrives F:,G:,H: -Hash"
-    Write-Host ""
-    Write-Host "  # Hash 200 file cuối cùng (ưu tiên phần copy sau cùng):"
-    Write-Host "  .\${scriptName} -Hash -HashLastN 200"
+    Write-Host "  .\${scriptName} -SourceRoot 'D:\A Di Da Phat' -DestDrives F:,G:,H: -Hash -HashLastN 200"
     Write-Host ""
 }
 
-# --- Nếu người dùng gọi -h / -Help thì show hướng dẫn và dừng ---
 if ($h -or $Help) {
     Show-Help
-    return
+    if (-not $NoPause) { Read-Host "Nhấn Enter để thoát..." | Out-Null }
+    exit 0
 }
 
-Write-Host "===== KIỂM TRA COPY (mp3, follow symlink/junction) =====" -ForegroundColor Cyan
-Write-Host "Source : $SourceRoot" -ForegroundColor Cyan
-Write-Host "Drives : $($DestDrives -join ', ')" -ForegroundColor Cyan
-if ($Hash) {
-    if ($HashLastN -gt 0) {
-        Write-Host "Hash   : ON ($HashAlgorithm), chỉ $HashLastN file cuối cùng" -ForegroundColor Cyan
-    } else {
-        Write-Host "Hash   : ON ($HashAlgorithm), toàn bộ file chung" -ForegroundColor Cyan
-    }
-} else {
-    Write-Host "Hash   : OFF (chỉ check tên + kích thước file)" -ForegroundColor Cyan
+Write-Log "===== BẮT ĐẦU BƯỚC CHECK ====="
+
+if (-not (Test-Path $SourceRoot)) {
+    Write-Log "Thư mục nguồn không tồn tại: $SourceRoot" "ERROR"
+    if (-not $NoPause) { Read-Host "Nhấn Enter để thoát..." | Out-Null }
+    exit 1
 }
+
+# Chuẩn hoá ổ
+$DestDrives = $DestDrives | ForEach-Object {
+    ($_ -replace '\\','').TrimEnd(':') + ':'
+} | Select-Object -Unique
+
+Write-Host "===== CẤU HÌNH CHECK =====" -ForegroundColor Cyan
+Write-Host "SourceRoot    : $SourceRoot"
+Write-Host "DestDrives    : $($DestDrives -join ', ')"
+Write-Host "Hash          : $($Hash.IsPresent)"
+Write-Host "HashLastN     : $HashLastN"
+Write-Host "HashAlgorithm : $HashAlgorithm"
+Write-Host "LogFile       : $LogFile"
 Write-Host ""
+
+if (-not $NoConfirm) {
+    $ans = Read-Host "Tiếp tục với cấu hình trên? (Y/N, mặc định = Y)"
+    if ($ans -and $ans.ToUpper() -ne 'Y') {
+        Write-Log "Người dùng hủy bước CHECK." "WARN"
+        if (-not $NoPause) { Read-Host "Nhấn Enter để thoát..." | Out-Null }
+        exit 0
+    }
+}
 
 # ---- Hàm lấy danh sách mp3, có follow symlink nếu PowerShell hỗ trợ ----
 function Get-Mp3List {
@@ -89,7 +132,6 @@ function Get-Mp3List {
         Force   = $true
     }
 
-    # PowerShell 7+ hỗ trợ -FollowSymlink
     $gciCmd = Get-Command Get-ChildItem
     if ($gciCmd.Parameters.ContainsKey('FollowSymlink')) {
         $params['FollowSymlink'] = $true
@@ -105,46 +147,19 @@ function Get-Mp3List {
     }
 }
 
-# -------- Kiểm tra tồn tại thư mục nguồn --------
-if (-not (Test-Path $SourceRoot)) {
-    Write-Host "❌ Thư mục nguồn KHÔNG tồn tại: $SourceRoot" -ForegroundColor Red
-    Write-Host ""
-    Show-Help
-    return
-}
-
-# -------- Xác nhận cấu hình trước khi chạy --------
-Write-Host "Cấu hình hiện tại:" -ForegroundColor Yellow
-Write-Host "  SourceRoot : $SourceRoot"
-Write-Host "  DestDrives : $($DestDrives -join ', ')"
-Write-Host "  Hash       : $($Hash.IsPresent)"
-Write-Host "  HashLastN  : $HashLastN"
-Write-Host "  Algorithm  : $HashAlgorithm"
-Write-Host ""
-
-$confirm = Read-Host "Tiếp tục kiểm tra với cấu hình trên? (Y/N, mặc định = Y)"
-if ($confirm -and $confirm.ToUpper() -ne 'Y') {
-    Write-Host "Đã huỷ thao tác." -ForegroundColor Yellow
-    return
-}
-
 # -------- SOURCE --------
-Write-Host ""
-Write-Host "Đang quét SOURCE: $SourceRoot" -ForegroundColor Cyan
+Write-Log "Đang quét SOURCE: $SourceRoot"
 $srcList  = Get-Mp3List -Root $SourceRoot
 $srcCount = $srcList.Count
 $srcSize  = ($srcList | Measure-Object Length -Sum).Sum
 
-Write-Host "SOURCE: $srcCount file mp3, tổng dung lượng: $([math]::Round($srcSize/1MB,2)) MB"
-Write-Host ""
-
-# ================= CHẠY CHECK SONG SONG CÁC Ổ =================
+Write-Log ("SOURCE: {0} file mp3, ~{1:N2} MB" -f $srcCount, ($srcSize/1MB))
 
 $jobs = @()
-$summaries = @()   # tổng kết theo ổ
+$summaries = @()
 
 foreach ($drv in $DestDrives) {
-    $jobs += Start-Job -ArgumentList $drv, $SourceRoot, $srcList, $Hash, $HashAlgorithm, $HashLastN, $srcCount, $srcSize -ScriptBlock {
+    $jobs += Start-Job -ArgumentList $drv, $SourceRoot, $srcList, $Hash, $HashAlgorithm, $HashLastN, $srcCount, $srcSize, $LogFile -ScriptBlock {
         param(
             $drv,
             $SourceRoot,
@@ -153,10 +168,30 @@ foreach ($drv in $DestDrives) {
             $HashAlgorithm,
             $HashLastN,
             $srcCount,
-            $srcSize
+            $srcSize,
+            $LogFile
         )
 
-        # --- chuẩn bị biến tổng kết ---
+        function Write-LogLocal {
+            param(
+                [string]$Message,
+                [string]$Level = "INFO"
+            )
+            $timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+            $line = "[{0}] [CHECK] [{1}] {2}" -f $timestamp, $Level.ToUpper(), $Message
+
+            switch ($Level.ToUpper()) {
+                "ERROR" { Write-Host $line -ForegroundColor Red }
+                "WARN"  { Write-Host $line -ForegroundColor Yellow }
+                "INFO"  { Write-Host $line -ForegroundColor Gray }
+                default { Write-Host $line }
+            }
+
+            if ($LogFile) {
+                Add-Content -Path $LogFile -Value $line
+            }
+        }
+
         $summary = [PSCustomObject]@{
             Drive            = $drv
             Status           = "Unknown"
@@ -170,28 +205,27 @@ foreach ($drv in $DestDrives) {
         }
 
         try {
-            # Tạo map source theo RelPath
             $srcMap = @{}
             foreach ($f in $srcList) {
                 $srcMap[$f.RelPath.ToLower()] = $f
             }
         }
         catch {
-            Write-Host "[$drv] ❌ Lỗi khi chuẩn bị dữ liệu source: $_" -ForegroundColor Red
+            Write-LogLocal "[$drv] Lỗi khi chuẩn bị dữ liệu source: $_" "ERROR"
             $summary.Status       = "Error"
             $summary.ErrorMessage = "Lỗi chuẩn bị source: $_"
             Write-Output $summary
             return
         }
 
-        $destRoot = Join-Path $drv "A Di Da Phat"
+        $destRoot = Join-Path $drv (Split-Path $SourceRoot -Leaf)
 
-        Write-Host "===== KIỂM TRA Ổ $drv =====" -ForegroundColor Yellow
+        Write-LogLocal "===== KIỂM TRA Ổ $drv (dest: $destRoot) ====="
 
         if (-not (Test-Path $destRoot)) {
-            Write-Host "[$drv] ❌ Không tìm thấy thư mục đích: $destRoot" -ForegroundColor Red
+            Write-LogLocal "[$drv] Thư mục đích không tồn tại: $destRoot" "ERROR"
             $summary.Status       = "Error"
-            $summary.ErrorMessage = "Không tìm thấy thư mục đích."
+            $summary.ErrorMessage = "Thư mục đích không tồn tại."
             Write-Output $summary
             return
         }
@@ -200,14 +234,13 @@ foreach ($drv in $DestDrives) {
             $destFull = (Resolve-Path $destRoot).ProviderPath
         }
         catch {
-            Write-Host "[$drv] ❌ Lỗi Resolve-Path cho đích ${destRoot}: $_" -ForegroundColor Red
+            Write-LogLocal "[$drv] Lỗi Resolve-Path cho đích: $_" "ERROR"
             $summary.Status       = "Error"
-            $summary.ErrorMessage = "Lỗi Resolve-Path: $_"
+            $summary.ErrorMessage = "Lỗi Resolve-Path."
             Write-Output $summary
             return
         }
 
-        # Danh sách mp3 ở DEST
         try {
             $dstList = Get-ChildItem -Path $destFull -Filter *.mp3 -Recurse -File -Force |
                 ForEach-Object {
@@ -220,9 +253,9 @@ foreach ($drv in $DestDrives) {
                 }
         }
         catch {
-            Write-Host "[$drv] ❌ Lỗi khi quét file mp3 ở đích: $_" -ForegroundColor Red
+            Write-LogLocal "[$drv] Lỗi quét file mp3 ở đích: $_" "ERROR"
             $summary.Status       = "Error"
-            $summary.ErrorMessage = "Lỗi Get-ChildItem đích: $_"
+            $summary.ErrorMessage = "Lỗi Get-ChildItem đích."
             Write-Output $summary
             return
         }
@@ -230,16 +263,14 @@ foreach ($drv in $DestDrives) {
         $dstCount = $dstList.Count
         $dstSize  = ($dstList | Measure-Object Length -Sum).Sum
 
-        Write-Host "[$drv] DEST: $dstCount file mp3, tổng dung lượng: $([math]::Round($dstSize/1MB,2)) MB"
+        Write-LogLocal ("[$drv] DEST: {0} file mp3, ~{1:N2} MB" -f $dstCount, ($dstSize/1MB))
 
-        # ---- So sánh số lượng + tổng dung lượng ----
         if ($srcCount -eq $dstCount -and $srcSize -eq $dstSize) {
-            Write-Host "[$drv] ✅ Số lượng & tổng dung lượng KHỚP với source." -ForegroundColor Green
+            Write-LogLocal "[$drv] Số lượng & tổng dung lượng KHỚP với source."
         } else {
-            Write-Host "[$drv] ❌ KHÔNG KHỚP (số file hoặc tổng dung lượng khác)" -ForegroundColor Red
+            Write-LogLocal "[$drv] KHÔNG KHỚP (số file hoặc tổng dung lượng khác)." "WARN"
         }
 
-        # ---- So sánh chi tiết tên + size ----
         $dstMap = @{}
         foreach ($f in $dstList) {
             $dstMap[$f.RelPath.ToLower()] = $f
@@ -274,37 +305,21 @@ foreach ($drv in $DestDrives) {
         $summary.SizeDiffCount = $sizeDiff.Count
 
         if ($onlyInSrc.Count -eq 0 -and $onlyInDst.Count -eq 0 -and $sizeDiff.Count -eq 0) {
-            Write-Host "[$drv] 👉 Chi tiết: tên & kích thước file mp3 KHỚP." -ForegroundColor Green
-        }
-        else {
-            Write-Host "[$drv] 👉 Chi tiết sai khác:" -ForegroundColor Yellow
+            Write-LogLocal "[$drv] Chi tiết: tên & kích thước file mp3 KHỚP."
+        } else {
+            Write-LogLocal "[$drv] Chi tiết sai khác:" "WARN"
 
             if ($onlyInSrc.Count -gt 0) {
-                Write-Host "  [$drv] - Có ở SOURCE nhưng thiếu ở DEST:" -ForegroundColor Red
-                $onlyInSrc | Select-Object -First 20 | ForEach-Object { Write-Host "      $_" }
-                if ($onlyInSrc.Count -gt 20) {
-                    Write-Host "      ... còn $($onlyInSrc.Count - 20) file nữa" -ForegroundColor DarkYellow
-                }
+                Write-LogLocal "[$drv]  - Có ở SOURCE nhưng thiếu ở DEST: $($onlyInSrc.Count) file." "WARN"
             }
-
             if ($onlyInDst.Count -gt 0) {
-                Write-Host "  [$drv] - Chỉ có ở DEST (extra):" -ForegroundColor Magenta
-                $onlyInDst | Select-Object -First 20 | ForEach-Object { Write-Host "      $_" }
-                if ($onlyInDst.Count -gt 20) {
-                    Write-Host "      ... còn $($onlyInDst.Count - 20) file nữa" -ForegroundColor DarkYellow
-                }
+                Write-LogLocal "[$drv]  - Chỉ có ở DEST (extra): $($onlyInDst.Count) file." "WARN"
             }
-
             if ($sizeDiff.Count -gt 0) {
-                Write-Host "  [$drv] - File đường dẫn giống nhưng kích thước khác:" -ForegroundColor Red
-                $sizeDiff | Select-Object RelPath,
-                                          @{n='SrcKB';e={ [math]::Round($_.SrcLength/1KB,1) }},
-                                          @{n='DstKB';e={ [math]::Round($_.DstLength/1KB,1) }} |
-                            Format-Table -AutoSize
+                Write-LogLocal "[$drv]  - File đường dẫn giống nhưng kích thước khác: $($sizeDiff.Count) file." "WARN"
             }
         }
 
-        # Nếu không bật hash → kết luận & trả summary
         if (-not $Hash) {
             if ($summary.MissingCount -eq 0 -and
                 $summary.ExtraCount   -eq 0 -and
@@ -314,15 +329,11 @@ foreach ($drv in $DestDrives) {
                 $summary.Status = "Mismatch"
             }
             Write-Output $summary
-            Write-Host ""
             return
         }
 
-        # ================= HASH CHECK (tuỳ chọn) =================
+        # ================= HASH CHECK =================
 
-        # Chỉ hash những file:
-        # - có ở cả source & dest
-        # - kích thước bằng nhau
         $common = @()
         foreach ($rel in $srcMap.Keys) {
             if ($dstMap.ContainsKey($rel)) {
@@ -338,27 +349,24 @@ foreach ($drv in $DestDrives) {
         }
 
         if ($common.Count -eq 0) {
-            Write-Host "[$drv] ⚠ Không có file chung (cùng size) nào để hash." -ForegroundColor DarkYellow
+            Write-LogLocal "[$drv] Không có file chung (cùng size) nào để hash." "WARN"
             $summary.Status       = "Mismatch"
             $summary.ErrorMessage = "Không có file chung để hash."
             Write-Output $summary
-            Write-Host ""
             return
         }
 
-        # Sắp xếp và chọn file để hash (ưu tiên N file CUỐI)
         $filesToHash = $common | Sort-Object RelPath
 
         if ($HashLastN -gt 0 -and $HashLastN -lt $filesToHash.Count) {
-            # dùng Last để ưu tiên file copy sau cùng
             $filesToHash = $filesToHash | Select-Object -Last $HashLastN
-            Write-Host "[$drv] 🔍 Hash: đang kiểm tra $HashLastN file cuối cùng (tổng chung: $($common.Count))..." -ForegroundColor Cyan
+            Write-LogLocal "[$drv] Hash: kiểm tra $HashLastN file cuối cùng (tổng chung: $($common.Count))."
         } else {
-            Write-Host "[$drv] 🔍 Hash: đang kiểm tra TOÀN BỘ $($filesToHash.Count) file chung..." -ForegroundColor Cyan
+            Write-LogLocal "[$drv] Hash: kiểm tra TOÀN BỘ $($filesToHash.Count) file chung."
         }
 
         $hashMismatch = @()
-        $srcHashCache = @{}   # cache hash source theo FullName
+        $srcHashCache = @{}
         $total        = $filesToHash.Count
         $summary.HashCheckedCount = $total
 
@@ -375,12 +383,10 @@ foreach ($drv in $DestDrives) {
                 $dstHash = (Get-FileHash -Path $item.Dst -Algorithm $HashAlgorithm).Hash
             }
             catch {
-                Write-Host "[$drv]  [$i/$total] Lỗi hash: $rel - $_" -ForegroundColor Red
+                Write-LogLocal "[$drv] Lỗi hash file: $rel - $_" "ERROR"
                 $summary.Status       = "Error"
                 $summary.ErrorMessage = "Lỗi khi hash file."
-                # Lỗi “cứng” khi hash → dừng, không xử lý tiếp
                 Write-Output $summary
-                Write-Host ""
                 return
             }
 
@@ -393,20 +399,16 @@ foreach ($drv in $DestDrives) {
             }
 
             if ($i % 100 -eq 0) {
-                Write-Host "[$drv]  ... đã hash $i / $total file" -ForegroundColor DarkGray
+                Write-LogLocal "[$drv]  ... đã hash $i / $total file."
             }
         }
 
         $summary.HashMismatchCount = $hashMismatch.Count
 
         if ($hashMismatch.Count -eq 0) {
-            Write-Host "[$drv] ✅ Hash: tất cả file được kiểm tra đều KHỚP." -ForegroundColor Green
+            Write-LogLocal "[$drv] Hash: tất cả file được kiểm tra đều KHỚP."
         } else {
-            Write-Host "[$drv] ❌ Hash: phát hiện file KHÔNG KHỚP hash:" -ForegroundColor Red
-            $hashMismatch | Select-Object -First 20 | Format-Table -AutoSize
-            if ($hashMismatch.Count -gt 20) {
-                Write-Host "  [$drv] ... còn $($hashMismatch.Count - 20) file mismatch nữa" -ForegroundColor DarkYellow
-            }
+            Write-LogLocal "[$drv] Hash: phát hiện $($hashMismatch.Count) file KHÔNG KHỚP hash." "ERROR"
         }
 
         if ($summary.MissingCount -eq 0 -and
@@ -419,15 +421,12 @@ foreach ($drv in $DestDrives) {
         }
 
         Write-Output $summary
-        Write-Host ""
     }
 }
 
-# ------ Nhận kết quả: ổ nào xong trước in trước ------
 while ($jobs.Count -gt 0) {
     $finished = Wait-Job -Job $jobs -Any
-    $results  = Receive-Job $finished   # sẽ in log theo thứ tự job hoàn thành
-    # Lọc các object tổng kết
+    $results  = Receive-Job $finished
     $summaries += $results | Where-Object {
         $_ -is [pscustomobject] -and
         $_.PSObject.Properties.Name -contains 'Drive' -and
@@ -437,11 +436,14 @@ while ($jobs.Count -gt 0) {
     Remove-Job $finished
 }
 
-# ------ Báo cáo tổng kết ------
-Write-Host "===== TỔNG KẾT THEO Ổ =====" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "===== TỔNG KẾT CHECK =====" -ForegroundColor Cyan
+
+$overallOK = $true
 
 if ($summaries.Count -eq 0) {
-    Write-Host "Không thu được summary nào (có thể script bị lỗi trước khi chạy job)." -ForegroundColor Red
+    Write-Log "Không thu được summary nào từ job." "ERROR"
+    $overallOK = $false
 } else {
     $summaries | Sort-Object Drive | ForEach-Object {
         $d = $_
@@ -462,8 +464,19 @@ if ($summaries.Count -eq 0) {
         if ($d.HashEnabled) {
             Write-Host ("  Hash  : đã check {0} file, mismatch: {1}" -f $d.HashCheckedCount, $d.HashMismatchCount) -ForegroundColor Gray
         }
+
+        if ($d.Status -ne "OK") {
+            $overallOK = $false
+        }
     }
 }
 
-Write-Host ""
-Read-Host "Nhấn Enter để thoát..."
+if (-not $NoPause) {
+    Read-Host "Nhấn Enter để thoát..." | Out-Null
+}
+
+if ($overallOK) {
+    exit 0
+} else {
+    exit 1
+}
