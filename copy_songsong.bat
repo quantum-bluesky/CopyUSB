@@ -1,0 +1,8 @@
+start robocopy /e "A Di Da Phat" "F:\A Di Da Phat"
+start robocopy /e "A Di Da Phat" "G:\A Di Da Phat"
+start robocopy /e "A Di Da Phat" "H:\A Di Da Phat"
+start robocopy /e "A Di Da Phat" "I:\A Di Da Phat"
+start robocopy /e "A Di Da Phat" "J:\A Di Da Phat"
+start robocopy /e "A Di Da Phat" "K:\A Di Da Phat"
+start robocopy /e "A Di Da Phat" "L:\A Di Da Phat"
+start robocopy /e "A Di Da Phat" "M:\A Di Da Phat"

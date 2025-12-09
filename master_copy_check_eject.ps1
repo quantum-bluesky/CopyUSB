@@ -23,7 +23,6 @@
     # Không hỏi confirm (auto yes)
     [switch]$AutoYes
 )
-
 # ================== HÀM GHI LOG ==================
 function Write-Log {
     param(
@@ -70,6 +69,18 @@ function Wait-DriveReady {
     return $false
 }
 
+# Bao dam duong dan khi dua vao cmdline khong lam thoat dau nhay do backslash cuoi
+function Quote-PathArg {
+    param([string]$Path)
+
+    $normalized = $Path.Trim('"')
+    if ($normalized.EndsWith('\')) {
+        # Nhan doi backslash cuoi de khong nuot dau nhay ket thuc
+        $normalized += '\'
+    }
+
+    return '"{0}"' -f $normalized
+}
 # ================== KHỞI TẠO LOG ==================
 if (-not (Test-Path $LogDir)) {
     New-Item -Path $LogDir -ItemType Directory -Force | Out-Null
@@ -358,10 +369,9 @@ Write-Log "BẮT ĐẦU BƯỚC COPY bằng robocopy..."
 $copyProcesses = @()
 $copyResults = @{}
 
-$threadNo = 32 / $PreparedTargets.Count
-if ($threadNo -gt 16) {
-    $threadNo = 16
-}
+$threadNo = [int][Math]::Floor(32 / $PreparedTargets.Count)
+if ($threadNo -lt 1) { $threadNo = 1 }
+if ($threadNo -gt 16) { $threadNo = 16 }
 foreach ($drv in $PreparedTargets) {
     # Đảm bảo ổ đã ready trước khi tạo thư mục & chạy robocopy
     if (-not (Wait-DriveReady $drv 30)) {
@@ -380,9 +390,12 @@ foreach ($drv in $PreparedTargets) {
         continue
     }
 
+    $srcArg = Quote-PathArg $SourceRoot
+    $dstArg = Quote-PathArg $destPath
+
     $params = @(
-        "`"$SourceRoot`"",
-        "`"$destPath`"",
+        $srcArg,
+        $dstArg,
         "/E",
         "/R:2",
         "/W:2",
@@ -401,7 +414,7 @@ foreach ($drv in $PreparedTargets) {
     # /MT:16: copy đa luồng (16 luồng)
 
     Write-Log ("Chạy robocopy tới {0}: robocopy {1}" -f $drv, ($params -join ' '))
-    $p = Start-Process -FilePath "robocopy.exe" -ArgumentList $params -PassThru -WindowStyle Hidden
+    $p = Start-Process -FilePath "robocopy.exe" -ArgumentList ($params -join ' ') -PassThru -WindowStyle Hidden
     $copyProcesses += [PSCustomObject]@{
         Drive    = $drv
         Process  = $p
@@ -442,13 +455,13 @@ else {
 
     $argList = @(
         "-NoProfile", "-ExecutionPolicy", "Bypass",
-        "-File", $CheckScriptPath,
-        "-SourceRoot", $SourceRoot,
+        "-File", (Quote-PathArg $CheckScriptPath),
+        "-SourceRoot", (Quote-PathArg $SourceRoot),
         "-DestDrives"
     ) + $PreparedTargets + @(
         "-NoConfirm",
         "-NoPause",
-        "-LogFile", $LogFile
+        "-LogFile", (Quote-PathArg $LogFile)
     )
 
     if ($EnableHash) {
@@ -459,7 +472,7 @@ else {
         )
     }
 
-    $ps = Start-Process -FilePath "powershell.exe" -ArgumentList $argList -PassThru -WindowStyle Hidden
+    $ps = Start-Process -FilePath "powershell.exe" -ArgumentList ($argList -join ' ') -PassThru -WindowStyle Hidden
     $ps.WaitForExit()
     $checkCode = $ps.ExitCode
 
@@ -483,10 +496,10 @@ else {
 
     $argListEject = @(
         "-NoProfile", "-ExecutionPolicy", "Bypass",
-        "-File", $EjectScriptPath
+        "-File", (Quote-PathArg $EjectScriptPath)
     ) + $drvArgs
 
-    $psEject = Start-Process -FilePath "powershell.exe" -ArgumentList $argListEject -PassThru
+    $psEject = Start-Process -FilePath "powershell.exe" -ArgumentList ($argListEject -join ' ') -PassThru
     $psEject.WaitForExit()
     $ejectCode = $psEject.ExitCode
 
