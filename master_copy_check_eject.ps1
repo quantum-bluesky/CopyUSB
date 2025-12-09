@@ -3,7 +3,7 @@
     [string]$SourceRoot = "D:\A Di Da Phat",
 
     # Danh sách ổ đích (USB) cần xử lý
-    [string[]]$DestDrives = @("F:","G:","H:","I:","J:","K:","L:","M:"),
+    [string[]]$DestDrives = @("F:", "G:", "H:", "I:", "J:", "K:", "L:", "M:"),
 
     # Đường dẫn script CHECK
     [string]$CheckScriptPath = ".\check_copy_hash.ps1",
@@ -11,7 +11,7 @@
     # Tham số cho bước CHECK
     [switch]$EnableHash,       # bật check hash
     [int]$HashLastN = 100,     # số file cuối cùng để hash (0 = hash toàn bộ)
-    [ValidateSet('MD5','SHA256')]
+    [ValidateSet('MD5', 'SHA256')]
     [string]$HashAlgorithm = 'MD5',
 
     # Đường dẫn script EJECT
@@ -36,14 +36,38 @@ function Write-Log {
 
     switch ($Level.ToUpper()) {
         "ERROR" { Write-Host $line -ForegroundColor Red }
-        "WARN"  { Write-Host $line -ForegroundColor Yellow }
-        "INFO"  { Write-Host $line -ForegroundColor Gray }
+        "WARN" { Write-Host $line -ForegroundColor Yellow }
+        "INFO" { Write-Host $line -ForegroundColor Gray }
         default { Write-Host $line }
     }
 
     if ($script:LogFile) {
         Add-Content -Path $script:LogFile -Value $line
     }
+}
+
+function Wait-DriveReady {
+    param(
+        [string]$Drive,     # ví dụ 'F:' hoặc 'F'
+        [int]$TimeoutSec = 30
+    )
+
+    $root = ($Drive.TrimEnd(':') + ":\")
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+    while ($sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
+        try {
+            if (Test-Path $root) {
+                return $true
+            }
+        }
+        catch {
+            # ignore, thử lại
+        }
+        Start-Sleep -Milliseconds 500
+    }
+
+    return $false
 }
 
 # ================== KHỞI TẠO LOG ==================
@@ -63,6 +87,9 @@ if (-not (Test-Path $SourceRoot)) {
     Write-Host "Vui lòng kiểm tra lại tham số -SourceRoot." -ForegroundColor Red
     exit 1
 }
+# Chuẩn hoá SourceRoot: bỏ nháy thừa, chuyển thành full path
+$SourceRoot = $SourceRoot.Trim('"')
+$SourceRoot = (Resolve-Path $SourceRoot).ProviderPath
 
 if (-not $DestDrives -or $DestDrives.Count -eq 0) {
     Write-Log "Không có ổ đích nào được chỉ định." "ERROR"
@@ -71,7 +98,7 @@ if (-not $DestDrives -or $DestDrives.Count -eq 0) {
 
 # Chuẩn hóa format ổ kiểu 'F:'
 $DestDrives = $DestDrives | ForEach-Object {
-    ($_ -replace '\\','').TrimEnd(':') + ':'
+    ($_ -replace '\\', '').TrimEnd(':') + ':'
 } | Select-Object -Unique
 
 # ================== HIỂN THỊ CẤU HÌNH & XÁC NHẬN ==================
@@ -94,15 +121,66 @@ if (-not $AutoYes) {
     }
 }
 
-# ================== HÀM TÍNH KÍCH THƯỚC SOURCE ==================
+# ================== HÀM TÍNH KÍCH THƯỚC SOURCE (THEO ROBOCOPY /L) ==================
 function Get-SourceSize {
     param([string]$Path)
 
-    Write-Log "Đang tính tổng dung lượng source: $Path"
-    $files = Get-ChildItem -Path $Path -Recurse -File -Force
-    $total = ($files | Measure-Object Length -Sum).Sum
-    Write-Log ("Tổng dung lượng source: {0:N0} bytes (~{1:N2} GB)" -f $total, ($total/1GB))
-    return $total
+    Write-Log "Đang ước lượng dung lượng source bằng robocopy /L (bao gồm cả symlink/junction)..."
+    
+    # Đảm bảo Path đã là full path, không có nháy
+    $Path = $Path.Trim('"')
+    $Path = (Resolve-Path $Path).ProviderPath
+
+    # Tạo thư mục tạm làm đích giả cho robocopy /L
+    $tempDest = Join-Path $env:TEMP ("_rcsz_" + [guid]::NewGuid().ToString())
+    New-Item -Path $tempDest -ItemType Directory -Force | Out-Null
+
+    # /L: chỉ liệt kê, không copy /E: copy toàn bộ cây /BYTES: tính theo byte
+    # /R:0 /W:0: không retry /NFL /NDL: không log file/dir chi tiết
+    $params = @(
+        $Path,
+        $tempDest,
+        "/E",       # full tree
+        "/L",       # chỉ liệt kê, không copy
+        "/BYTES",
+        "/R:0",
+        "/W:0",
+        "/NFL",
+        "/NDL"
+    )
+
+    $output = & robocopy @params 
+    Remove-Item -Path $tempDest -Recurse -Force -ErrorAction SilentlyContinue
+
+    $bytes = 0L
+    foreach ($line in $output) {
+        # Tìm dòng "Bytes : 12,345,678"
+        if ($line -match "Bytes\s*:\s*([\d,]+)") {
+            $bytes = [int64]($matches[1] -replace ",", "")
+        }
+    }
+
+    if ($bytes -le 0) {
+        Write-Log "Không parse được dung lượng từ robocopy, fallback sang Get-ChildItem (follow symlink nếu có)." "WARN"
+
+        $gciParams = @{
+            Path    = $Path
+            Recurse = $true
+            File    = $true
+            Force   = $true
+        }
+
+        $gciCmd = Get-Command Get-ChildItem
+        if ($gciCmd.Parameters.ContainsKey('FollowSymlink')) {
+            $gciParams['FollowSymlink'] = $true
+        }
+
+        $files = Get-ChildItem @gciParams
+        $bytes = ($files | Measure-Object Length -Sum).Sum
+    }
+
+    Write-Log ("Tổng dung lượng source: {0:N0} bytes (~{1:N2} GB)" -f $bytes, ($bytes / 1GB))
+    return $bytes
 }
 
 $sourceSize = Get-SourceSize -Path $SourceRoot
@@ -111,7 +189,7 @@ $sourceSize = Get-SourceSize -Path $SourceRoot
 Write-Log "Đang dò danh sách ổ USB (removable)..."
 
 $usbDisks = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=2" |
-            Select-Object DeviceID, Size, FreeSpace
+Select-Object DeviceID, Size, FreeSpace
 
 $usbMap = @{}
 foreach ($d in $usbDisks) {
@@ -125,9 +203,10 @@ foreach ($drv in $DestDrives) {
     if ($usbMap.ContainsKey($upper)) {
         $disk = $usbMap[$upper]
         Write-Log ("Ổ {0} (USB) Size={1:N2}GB, Free={2:N2}GB" -f `
-                  $upper, ($disk.Size/1GB), ($disk.FreeSpace/1GB))
+                $upper, ($disk.Size / 1GB), ($disk.FreeSpace / 1GB))
         $ValidTargets += $upper
-    } else {
+    }
+    else {
         Write-Log "Ổ $upper KHÔNG phải USB (hoặc không tìm thấy). Bỏ qua." "WARN"
     }
 }
@@ -147,7 +226,7 @@ if ($LargeUsb.Count -gt 0 -and -not $AutoYes) {
     Write-Host "CẢNH BÁO: các ổ USB sau có dung lượng >= 16GB, có thể bị XOÁ/FORMAT:" -ForegroundColor Yellow
     $LargeUsb | ForEach-Object {
         $disk = $usbMap[$_]
-        Write-Host ("  {0}  ~{1:N2} GB" -f $_, ($disk.Size/1GB)) -ForegroundColor Yellow
+        Write-Host ("  {0}  ~{1:N2} GB" -f $_, ($disk.Size / 1GB)) -ForegroundColor Yellow
     }
     $ans = Read-Host "TIẾP TỤC xử lý các ổ lớn này? (Y = tiếp tục, giá trị khác = BỎ QUA các ổ >=16GB)"
     if (-not ($ans -and $ans.ToUpper() -eq 'Y')) {
@@ -181,17 +260,17 @@ foreach ($drv in $ValidTargets) {
     $totalSize = [double]$disk.Size
     $freeSpace = [double]$disk.FreeSpace
     $usedBytes = $totalSize - $freeSpace
-    $usedMB    = $usedBytes / 1MB
-    $usedPct   = if ($totalSize -gt 0) { $usedBytes / $totalSize } else { 0 }
+    $usedMB = $usedBytes / 1MB
+    $usedPct = if ($totalSize -gt 0) { $usedBytes / $totalSize } else { 0 }
 
     Write-Log ("--- ĐÁNH GIÁ Ổ {0} ---" -f $drv)
     Write-Log ("Size={0:N2}GB, Free={1:N2}GB, Used={2:N2}MB ({3:P1})" -f `
-              ($totalSize/1GB), ($freeSpace/1GB), $usedMB, $usedPct)
+        ($totalSize / 1GB), ($freeSpace / 1GB), $usedMB, $usedPct)
 
     # *** BƯỚC 0: check capacity tổng có đủ chứa source không ***
     if ($totalSize -lt $sourceSize) {
         Write-Log ("Ổ {0} có dung lượng tổng ({1:N2}GB) < dung lượng source (~{2:N2}GB). Bỏ qua ổ này." -f `
-                  $drv, ($totalSize/1GB), ($sourceSize/1GB)) "WARN"
+                $drv, ($totalSize / 1GB), ($sourceSize / 1GB)) "WARN"
         continue
     }
 
@@ -199,7 +278,8 @@ foreach ($drv in $ValidTargets) {
     if ($usedMB -lt 20) {
         Write-Log "Dữ liệu hiện tại trên ổ $drv < 20MB → giữ nguyên, chỉ copy thêm."
         # Không đụng vào dữ liệu; freeSpace vẫn giữ giá trị hiện tại
-    } else {
+    }
+    else {
         Write-Log ("CẢNH BÁO: Ổ {0} đang có dữ liệu {1:N2}MB." -f $drv, $usedMB) "WARN"
 
         if ($usedPct -lt 0.2) {
@@ -208,6 +288,11 @@ foreach ($drv in $ValidTargets) {
             try {
                 Get-ChildItem -Path ($drv + "\") -Force | Remove-Item -Recurse -Force -ErrorAction Stop
                 Write-Log "Đã xóa toàn bộ dữ liệu trên ổ $drv."
+                # tuỳ chọn: chờ ổ ổn định lại
+                if (-not (Wait-DriveReady $drv 15)) {
+                    Write-Log "Sau khi xóa dữ liệu, ổ $drv có vẻ không ổn định. BỎ QUA ổ này." "ERROR"
+                    continue
+                }
                 # Reload thông tin disk
                 $disk = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='{0}'" -f $drv)
                 $totalSize = [double]$disk.Size
@@ -217,14 +302,29 @@ foreach ($drv in $ValidTargets) {
                 Write-Log "Lỗi khi xóa dữ liệu trên ổ ${drv}: $_" "ERROR"
                 continue
             }
-        } else {
-            # OPTION B: quick format
-            Write-Log ("Áp dụng OPTION B cho {0}: QUICK FORMAT (Used>={1:P0})." -f $drv, 0.2) "WARN"
+        }
+        else {
+            # OPTION B: quick format FAT32
+            Write-Log ("Áp dụng OPTION B cho {0}: QUICK FORMAT FAT32 (Used>={1:P0})." -f $drv, 0.2) "WARN"
+
+            # Windows thường không cho FAT32 > 32GB
+            if ($totalSize -gt 32GB) {
+                Write-Log ("Ổ {0} > 32GB, thường không format FAT32 được trên Windows. BỎ QUA ổ này." -f $drv) "ERROR"
+                continue
+            }
+
             try {
                 $letter = $drv.TrimEnd(':')
-                Format-Volume -DriveLetter $letter -FileSystem NTFS -NewFileSystemLabel "USB_$letter" -Confirm:$false -Force
-                Write-Log "Đã quick format ổ $drv."
-                # Reload
+                Write-Log ("Đang format FAT32 ổ {0}..." -f $drv) "WARN"
+                Format-Volume -DriveLetter $letter -FileSystem FAT32 -NewFileSystemLabel "USB_$letter" -Confirm:$false -Force -ErrorAction Stop
+                Write-Log "Đã quick format FAT32 ổ $drv."
+
+                # CHỜ ổ mount lại
+                if (-not (Wait-DriveReady $drv 30)) {
+                    Write-Log "Sau khi format, ổ $drv không ready trong 30s. BỎ QUA ổ này." "ERROR"
+                    continue
+                }
+
                 $disk = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='{0}'" -f $drv)
                 $totalSize = [double]$disk.Size
                 $freeSpace = [double]$disk.FreeSpace
@@ -239,7 +339,7 @@ foreach ($drv in $ValidTargets) {
     # BƯỚC 2: check freeSpace sau xử lý
     if ($freeSpace -lt $sourceSize) {
         Write-Log ("Ổ {0} KHÔNG đủ dung lượng trống sau xử lý. Free={1:N2}GB, Source~{2:N2}GB" -f `
-                  $drv, ($freeSpace/1GB), ($sourceSize/1GB)) "ERROR"
+                $drv, ($freeSpace / 1GB), ($sourceSize / 1GB)) "ERROR"
         continue
     }
 
@@ -256,29 +356,59 @@ if ($PreparedTargets.Count -eq 0) {
 Write-Log "BẮT ĐẦU BƯỚC COPY bằng robocopy..."
 
 $copyProcesses = @()
-$copyResults   = @{}
+$copyResults = @{}
 
+$threadNo = 32 / $PreparedTargets.Count
+if ($threadNo -gt 16) {
+    $threadNo = 16
+}
 foreach ($drv in $PreparedTargets) {
+    # Đảm bảo ổ đã ready trước khi tạo thư mục & chạy robocopy
+    if (-not (Wait-DriveReady $drv 30)) {
+        Write-Log "Ổ $drv KHÔNG ready trước khi copy. BỎ QUA ổ này." "ERROR"
+        continue
+    }
     $destPath = Join-Path $drv (Split-Path $SourceRoot -Leaf)
 
-    if (-not (Test-Path $destPath)) {
-        New-Item -Path $destPath -ItemType Directory -Force | Out-Null
+    try {
+        if (-not (Test-Path $destPath)) {
+            New-Item -Path $destPath -ItemType Directory -Force | Out-Null
+        }
+    }
+    catch {
+        Write-Log "Lỗi khi tạo thư mục đích $destPath trên ổ ${drv}: $_" "ERROR"
+        continue
     }
 
-    $args = @(
+    $params = @(
         "`"$SourceRoot`"",
         "`"$destPath`"",
         "/E",
-        "/MT:16"
+        "/R:2",
+        "/W:2",
+        "/LOG+:$LogFile",
+        "/NFL",
+        "/NDL",
+        "/MT:$threadNo"
     )
+    #giải thích tham số:
+    # /E: copy toàn bộ cây thư mục, bao gồm thư mục rỗng
+    # /R:2: retry 2 lần nếu lỗi
+    # /W:2: chờ 2 giây giữa các lần retry
+    # /LOG+: append log vào file log chung
+    # /NFL: không log tên file
+    # /NDL: không log tên thư mục
+    # /MT:16: copy đa luồng (16 luồng)
 
-    Write-Log ("Chạy robocopy tới {0}: robocopy {1}" -f $drv, ($args -join ' '))
-    $p = Start-Process -FilePath "robocopy.exe" -ArgumentList $args -PassThru -WindowStyle Hidden
+    Write-Log ("Chạy robocopy tới {0}: robocopy {1}" -f $drv, ($params -join ' '))
+    $p = Start-Process -FilePath "robocopy.exe" -ArgumentList $params -PassThru -WindowStyle Hidden
     $copyProcesses += [PSCustomObject]@{
         Drive    = $drv
         Process  = $p
         DestPath = $destPath
     }
+    # Giãn thời gian khởi tạo process để tránh tranh chấp tài nguyên
+    Start-Sleep -Milliseconds 500
 }
 
 foreach ($cp in $copyProcesses) {
@@ -290,7 +420,8 @@ foreach ($cp in $copyProcesses) {
 
     if ($code -ge 8) {
         Write-Log ("COPY tới {0} THẤT BẠI. ExitCode={1}" -f $drv, $code) "ERROR"
-    } else {
+    }
+    else {
         Write-Log ("COPY tới {0} HOÀN TẤT. ExitCode={1}" -f $drv, $code)
     }
 }
@@ -305,11 +436,12 @@ Write-Log "Tất cả copy robocopy hoàn tất (không lỗi mức >=8)."
 # ================== BƯỚC 3: CHECK ==================
 if (-not (Test-Path $CheckScriptPath)) {
     Write-Log "Không tìm thấy script CHECK: $CheckScriptPath. Bỏ qua bước CHECK." "WARN"
-} else {
+}
+else {
     Write-Log "BẮT ĐẦU BƯỚC CHECK bằng script: $CheckScriptPath"
 
     $argList = @(
-        "-NoProfile","-ExecutionPolicy","Bypass",
+        "-NoProfile", "-ExecutionPolicy", "Bypass",
         "-File", $CheckScriptPath,
         "-SourceRoot", $SourceRoot,
         "-DestDrives"
@@ -334,7 +466,8 @@ if (-not (Test-Path $CheckScriptPath)) {
     if ($checkCode -ne 0) {
         Write-Log ("BƯỚC CHECK báo lỗi (ExitCode={0}). DỪNG, KHÔNG EJECT." -f $checkCode) "ERROR"
         exit 1
-    } else {
+    }
+    else {
         Write-Log "BƯỚC CHECK hoàn tất, không có lỗi nghiêm trọng."
     }
 }
@@ -342,13 +475,14 @@ if (-not (Test-Path $CheckScriptPath)) {
 # ================== BƯỚC 4: EJECT ==================
 if (-not (Test-Path $EjectScriptPath)) {
     Write-Log "Không tìm thấy script EJECT: $EjectScriptPath. Bỏ qua bước EJECT." "WARN"
-} else {
+}
+else {
     Write-Log "BẮT ĐẦU BƯỚC EJECT với script: $EjectScriptPath"
 
     $drvArgs = $PreparedTargets | ForEach-Object { $_.ToLower() }
 
     $argListEject = @(
-        "-NoProfile","-ExecutionPolicy","Bypass",
+        "-NoProfile", "-ExecutionPolicy", "Bypass",
         "-File", $EjectScriptPath
     ) + $drvArgs
 
@@ -358,7 +492,8 @@ if (-not (Test-Path $EjectScriptPath)) {
 
     if ($ejectCode -ne 0) {
         Write-Log ("BƯỚC EJECT có lỗi (ExitCode={0})." -f $ejectCode) "ERROR"
-    } else {
+    }
+    else {
         Write-Log "BƯỚC EJECT hoàn tất."
     }
 }
