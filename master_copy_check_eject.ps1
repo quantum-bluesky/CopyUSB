@@ -296,85 +296,122 @@ foreach ($drv in $ValidTargets) {
         ($totalSize / 1GB), ($freeSpace / 1GB), $usedMB, $usedPct)
 
     # *** BƯỚC 0: check capacity tổng có đủ chứa source không ***
-    if ($totalSize -lt $sourceSize) {
-        Write-Log ("Ổ {0} có dung lượng tổng ({1:N2}GB) < dung lượng source (~{2:N2}GB). Bỏ qua ổ này." -f `
-                $drv, ($totalSize / 1GB), ($sourceSize / 1GB)) "WARN"
-        continue
-    }
+    if ($totalSize -gt $sourceSize) {
 
-    # BƯỚC 1: quyết định xử lý dữ liệu hiện có
-    if ($usedMB -lt 20) {
-        Write-Log "Dữ liệu hiện tại trên ổ $drv < 20MB → giữ nguyên, chỉ copy thêm."
-        # Không đụng vào dữ liệu; freeSpace vẫn giữ giá trị hiện tại
-    }
-    else {
-        Write-Log ("CẢNH BÁO: Ổ {0} đang có dữ liệu {1:N2}MB." -f $drv, $usedMB) "WARN"
+        # BƯỚC 1: quyết định xử lý dữ liệu hiện có
+        $skipCleanup = $false
+        if (-not $AutoYes -and $freeSpace -ge $sourceSize -and $usedMB -ge 20) {
+            Write-Host ""
+            Write-Host ("Ổ {0} đang còn trống {1:N2}GB, đủ để chứa source ~{2:N2}GB." -f $drv, ($freeSpace / 1GB), ($sourceSize / 1GB)) -ForegroundColor Yellow
+            $ansKeep = Read-Host "GIỮ NGUYÊN dữ liệu, KHÔNG xóa/format? (Y = giữ, giá trị khác = vẫn xóa/format)"
+            if ($ansKeep -and $ansKeep.ToUpper() -eq "Y") {
+                $skipCleanup = $true
+                Write-Log ("Người dùng chọn giữ nguyên dữ liệu trên ổ {0} (không xóa/format vì freeSpace đủ)." -f $drv) "WARN"
+            }
+        }
 
-        if ($usedPct -lt 0.2) {
-            # OPTION A: xóa file
-            Write-Log ("Áp dụng OPTION A cho {0}: Xóa toàn bộ file (Used<{1:P0} dung lượng)." -f $drv, 0.2)
-            try {
-                Get-ChildItem -Path ($drv + "\") -Force | Remove-Item -Recurse -Force -ErrorAction Stop
-                Write-Log "Đã xóa toàn bộ dữ liệu trên ổ $drv."
-                # tuỳ chọn: chờ ổ ổn định lại
-                if (-not (Wait-DriveReady $drv 15)) {
-                    Write-Log "Sau khi xóa dữ liệu, ổ $drv có vẻ không ổn định. BỎ QUA ổ này." "ERROR"
-                    continue
-                }
-                # Reload thông tin disk
-                $disk = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='{0}'" -f $drv)
-                $totalSize = [double]$disk.Size
-                $freeSpace = [double]$disk.FreeSpace
-            }
-            catch {
-                Write-Log "Lỗi khi xóa dữ liệu trên ổ ${drv}: $_" "ERROR"
-                continue
-            }
+        if ($usedMB -lt 20) {
+            Write-Log "Dữ liệu hiện tại trên ổ $drv < 20MB → giữ nguyên, chỉ copy thêm."
+            # Không đụng vào dữ liệu; freeSpace vẫn giữ giá trị hiện tại
         }
         else {
-            # OPTION B: quick format FAT32
-            Write-Log ("Áp dụng OPTION B cho {0}: QUICK FORMAT FAT32 (Used>={1:P0})." -f $drv, 0.2) "WARN"
+            Write-Log ("CẢNH BÁO: ổ {0} đang có dữ liệu {1:N2}MB." -f $drv, $usedMB) "WARN"
 
-            # Windows thường không cho FAT32 > 32GB
-            if ($totalSize -gt 32GB) {
-                Write-Log ("Ổ {0} > 32GB, thường không format FAT32 được trên Windows. BỎ QUA ổ này." -f $drv) "ERROR"
-                continue
+            if ($skipCleanup) {
+                Write-Log ("Bỏ qua xóa/format ổ {0} theo lựa chọn của người dùng." -f $drv) "WARN"
             }
-
-            try {
-                $letter = $drv.TrimEnd(':')
-                Write-Log ("Đang format FAT32 ổ {0}..." -f $drv) "WARN"
-                Format-Volume -DriveLetter $letter -FileSystem FAT32 -NewFileSystemLabel "USB_$letter" -Confirm:$false -Force -ErrorAction Stop
-                Write-Log "Đã quick format FAT32 ổ $drv."
-
-                # CHỜ ổ mount lại
-                if (-not (Wait-DriveReady $drv 30)) {
-                    Write-Log "Sau khi format, ổ $drv không ready trong 30s. BỎ QUA ổ này." "ERROR"
+            elseif ($usedPct -lt 0.2) {
+                # OPTION A: xóa file
+                Write-Log ("Áp dụng OPTION A cho {0}: Xóa toàn bộ file (Used<{1:P0} dung lượng)." -f $drv, 0.2)
+                try {
+                    Get-ChildItem -Path ($drv + "\") -Force | Remove-Item -Recurse -Force -ErrorAction Stop
+                    Write-Log "Đã xóa toàn bộ dữ liệu trên ổ $drv."
+                    # tùy chọn: chờ ổ ổn định lại
+                    if (-not (Wait-DriveReady $drv 15)) {
+                        Write-Log "Sau khi xóa dữ liệu, ổ $drv có vẻ không ổn định. BỎ QUA ổ này." "ERROR"
+                        continue
+                    }
+                    # Reload thông tin disk
+                    $disk = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='{0}'" -f $drv)
+                    $totalSize = [double]$disk.Size
+                    $freeSpace = [double]$disk.FreeSpace
+                }
+                catch {
+                    Write-Log "Lỗi khi xóa dữ liệu trên ổ ${drv}: $_" "ERROR"
                     continue
                 }
-
-                $disk = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='{0}'" -f $drv)
-                $totalSize = [double]$disk.Size
-                $freeSpace = [double]$disk.FreeSpace
             }
-            catch {
-                Write-Log "Lỗi khi format ổ ${drv}: $_" "ERROR"
-                continue
+            else {
+                # OPTION B: quick format FAT32
+                # Nếu không AutoYes: kiểm tra nhanh ổ đích đã khớp source chưa (không hash)
+                if (-not $AutoYes -and (Test-Path $CheckScriptPath)) {
+                    Write-Log ("Kiểm tra nhanh ổ {0} trước khi format..." -f $drv)
+                    $quickArgs = @(
+                        "-NoProfile", "-ExecutionPolicy", "Bypass",
+                        "-File", $CheckScriptPath,
+                        "-SourceRoot", $SourceRoot,
+                        "-DestDrives", $drv,
+                        "-NoConfirm",
+                        "-NoPause",
+                        "-HashLastN", "0"
+                    )
+                    if ($LogFile) { $quickArgs += @("-LogFile", $LogFile) }
+                    & powershell.exe @quickArgs
+                    $quickCode = $LASTEXITCODE
+                    if ($quickCode -eq 0) {
+                        Write-Log ("Ổ {0} hiện đã khớp với source (check nhanh, không hash). Tiếp tục copy và có thể ghi đè dữ liệu mới hơn trên ổ đích." -f $drv) "WARN"
+                        $skipCleanup = $true
+                    }
+                    else {
+                        Write-Log ("Check nhanh trước format ổ {0} báo ExitCode={1}, tiếp tục format." -f $drv, $quickCode) "WARN"
+                    }
+                }
+
+                if ($skipCleanup) {
+                    if ($freeSpace -lt $sourceSize) { $freeSpace = [double]$totalSize }
+                }
+                else {
+                    # Windows thường không cho FAT32 > 32GB
+                    if ($totalSize -gt 32GB) {
+                        Write-Log ("Ổ {0} > 32GB, thường không format FAT32 được trên Windows. BỎ QUA ổ này." -f $drv) "ERROR"
+                        continue
+                    }
+
+                    try {
+                        $letter = $drv.TrimEnd(':')
+                        Write-Log ("Đang format FAT32 ổ {0}..." -f $drv) "WARN"
+                        Format-Volume -DriveLetter $letter -FileSystem FAT32 -NewFileSystemLabel "USB_$letter" -Confirm:$false -Force -ErrorAction Stop
+                        Write-Log "Đã quick format FAT32 ổ $drv."
+
+                        # Cho ổ mount lại
+                        if (-not (Wait-DriveReady $drv 30)) {
+                            Write-Log "Sau khi format, ổ $drv không ready trong 30s. BỎ QUA ổ này." "ERROR"
+                            continue
+                        }
+
+                        $disk = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='{0}'" -f $drv)
+                        $totalSize = [double]$disk.Size
+                        $freeSpace = [double]$disk.FreeSpace
+                    }
+                    catch {
+                        Write-Log "Lỗi khi format ổ ${drv}: $_" "ERROR"
+                        continue
+                    }
+                }
             }
         }
-    }
 
-    # BƯỚC 2: check freeSpace sau xử lý
-    if ($freeSpace -lt $sourceSize) {
-        Write-Log ("Ổ {0} KHÔNG đủ dung lượng trống sau xử lý. Free={1:N2}GB, Source~{2:N2}GB" -f `
-                $drv, ($freeSpace / 1GB), ($sourceSize / 1GB)) "ERROR"
-        continue
-    }
+        # BƯỚC 2: check freeSpace sau xử lý
+        if ($freeSpace -lt $sourceSize) {
+            Write-Log ("Ổ {0} KHÔNG đủ dung lượng trống sau xử lý. Free={1:N2}GB, Source~{2:N2}GB" -f `
+                    $drv, ($freeSpace / 1GB), ($sourceSize / 1GB)) "ERROR"
+            continue
+        }
 
-    Write-Log ("Ổ {0} đủ điều kiện để copy." -f $drv)
-    $PreparedTargets += $drv
+        Write-Log ("Ổ {0} đủ điều kiện để copy." -f $drv)
+        $PreparedTargets += $drv
+    }
 }
-
 if ($PreparedTargets.Count -eq 0) {
     Write-Log "Không còn ổ nào đủ điều kiện để copy sau khi đánh giá dung lượng & dữ liệu." "ERROR"
     exit 1
@@ -386,9 +423,9 @@ Write-Log "BẮT ĐẦU BƯỚC COPY bằng robocopy..."
 $copyProcesses = @()
 $copyResults = @{}
 
-$threadNo = [int][Math]::Floor(32 / $PreparedTargets.Count)
+$threadNo = [int][Math]::Floor(16 / $PreparedTargets.Count)
 if ($threadNo -lt 1) { $threadNo = 1 }
-if ($threadNo -gt 16) { $threadNo = 16 }
+if ($threadNo -gt 8) { $threadNo = 8 }
 foreach ($drv in $PreparedTargets) {
     # Đảm bảo ổ đã ready trước khi tạo thư mục & chạy robocopy
     if (-not (Wait-DriveReady $drv 30)) {
