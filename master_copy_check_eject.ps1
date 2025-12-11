@@ -281,6 +281,7 @@ if ($ValidTargets.Count -eq 0) {
 # 3) Sau khi xử lý data, check lại freeSpace >= sourceSize → mới được copy.
 
 $PreparedTargets = @()
+$MirrorTargets   = @()
 
 foreach ($drv in $ValidTargets) {
 
@@ -358,12 +359,31 @@ foreach ($drv in $ValidTargets) {
                     if ($LogFile) { $quickArgs += @("-LogFile", $LogFile) }
                     & powershell.exe @quickArgs
                     $quickCode = $LASTEXITCODE
-                    if ($quickCode -eq 0) {
-                        Write-Log ("Ổ {0} hiện đã khớp với source (check nhanh, không hash). Tiếp tục copy và có thể ghi đè dữ liệu mới hơn trên ổ đích." -f $drv) "WARN"
-                        $skipCleanup = $true
+                    $mirrorCopy = $false
+                    switch ($quickCode) {
+                        0 {
+                            Write-Log ("Ổ {0} hiện đã khớp với source (check nhanh, không hash). Bỏ qua format, tiếp tục copy bình thường." -f $drv) "WARN"
+                            $skipCleanup = $true
+                        }
+                        2 {
+                            Write-Log ("Check nhanh ổ {0} phát hiện sai khác size/hash (ExitCode=2). Bỏ qua format, tiếp tục copy bình thường." -f $drv) "WARN"
+                            $skipCleanup = $true
+                        }
+                        4 {
+                            Write-Log ("Check nhanh ổ {0} phát hiện thiếu file (ExitCode=4). Bỏ qua format, tiếp tục copy bình thường." -f $drv) "WARN"
+                            $skipCleanup = $true
+                        }
+                        3 {
+                            Write-Log ("Check nhanh ổ {0} phát hiện DEST thừa file (ExitCode=3). Bỏ qua format, copy kiểu MIRROR để xóa file dư." -f $drv) "WARN"
+                            $skipCleanup = $true
+                            $mirrorCopy = $true
+                        }
+                        Default {
+                            Write-Log ("Check nhanh trước format ổ {0} báo ExitCode={1}, tiếp tục format." -f $drv, $quickCode) "WARN"
+                        }
                     }
-                    else {
-                        Write-Log ("Check nhanh trước format ổ {0} báo ExitCode={1}, tiếp tục format." -f $drv, $quickCode) "WARN"
+                    if ($mirrorCopy -and ($MirrorTargets -notcontains $drv)) {
+                        $MirrorTargets += $drv
                     }
                 }
 
@@ -447,10 +467,13 @@ foreach ($drv in $PreparedTargets) {
     $srcArg = Quote-PathArg $SourceRoot
     $dstArg = Quote-PathArg $destPath
 
+    $useMirror = $MirrorTargets -contains $drv
+    $modeSwitch = if ($useMirror) { "/MIR" } else { "/E" }
+
     $params = @(
         $srcArg,
         $dstArg,
-        "/E",
+        $modeSwitch,
         "/R:2",
         "/W:2",
         "/LOG+:$LogFile",
@@ -458,6 +481,9 @@ foreach ($drv in $PreparedTargets) {
         "/NDL",
         "/MT:$threadNo"
     )
+    if ($useMirror) {
+        Write-Log ("Copy ổ {0} được chạy với mode MIRROR (do quick check ExitCode=3)." -f $drv) "WARN"
+    }
     #giải thích tham số:
     # /E: copy toàn bộ cây thư mục, bao gồm thư mục rỗng
     # /R:2: retry 2 lần nếu lỗi
