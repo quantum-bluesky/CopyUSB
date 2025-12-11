@@ -202,6 +202,8 @@ foreach ($drv in $DestDrives) {
             HashEnabled      = [bool]$Hash
             HashCheckedCount = 0
             HashMismatchCount= 0
+            MissingParentsAllEmpty    = $true
+            MissingParentsAnyHasFiles = $false
         }
 
         try {
@@ -303,6 +305,30 @@ foreach ($drv in $DestDrives) {
         $summary.MissingCount  = $onlyInSrc.Count
         $summary.ExtraCount    = $onlyInDst.Count
         $summary.SizeDiffCount = $sizeDiff.Count
+
+        # Phân loại missing: thư mục cha có file trực tiếp hay không
+        if ($onlyInSrc.Count -gt 0) {
+            $parents = $onlyInSrc | ForEach-Object { Split-Path -Path $_ -Parent } | Sort-Object -Unique
+            $allEmpty = $true
+            $anyHasFile = $false
+            foreach ($parentRel in $parents) {
+                $parentDest = if ([string]::IsNullOrEmpty($parentRel)) { $destFull } else { Join-Path $destFull $parentRel }
+                try {
+                    $hasDirect = (Get-ChildItem -Path $parentDest -File -Force -ErrorAction Stop | Select-Object -First 1)
+                    if ($hasDirect) {
+                        $anyHasFile = $true
+                        $allEmpty = $false
+                        break
+                    }
+                }
+                catch {
+                    # Nếu thư mục cha không tồn tại, xem như không có file trực tiếp
+                    continue
+                }
+            }
+            $summary.MissingParentsAllEmpty    = $allEmpty
+            $summary.MissingParentsAnyHasFiles = $anyHasFile
+        }
 
         if ($onlyInSrc.Count -eq 0 -and $onlyInDst.Count -eq 0 -and $sizeDiff.Count -eq 0) {
             Write-LogLocal "[$drv] Chi tiết: tên & kích thước file mp3 KHỚP."
@@ -478,7 +504,11 @@ if ($summaries.Count -eq 0) {
             $exitCode  = [Math]::Max($exitCode, 1)
             $overallOK = $false
         } elseif ($d.MissingCount -gt 0) {
-            $exitCode  = [Math]::Max($exitCode, 4)
+            if ($d.MissingParentsAnyHasFiles) {
+                $exitCode = [Math]::Max($exitCode, 5)
+            } else {
+                $exitCode = [Math]::Max($exitCode, 4)
+            }
             $overallOK = $false
         } elseif ($d.ExtraCount -gt 0) {
             $exitCode  = [Math]::Max($exitCode, 3)
