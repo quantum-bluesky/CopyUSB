@@ -479,6 +479,8 @@ foreach ($drv in $PreparedTargets) {
         "/LOG+:$LogFile",
         "/NFL",
         "/NDL",
+        "/NP",
+        "/Z",
         "/MT:$threadNo"
     )
     if ($useMirror) {
@@ -491,6 +493,8 @@ foreach ($drv in $PreparedTargets) {
     # /LOG+: append log vào file log chung
     # /NFL: không log tên file
     # /NDL: không log tên thư mục
+    # /NP: không log phần trăm hoàn thành
+    # /Z: copy ở chế độ restartable
     # /MT:16: copy đa luồng (16 luồng)
 
     Write-Log ("Chạy robocopy tới {0}: robocopy {1}" -f $drv, ($params -join ' '))
