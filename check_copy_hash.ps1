@@ -332,6 +332,13 @@ foreach ($drv in $DestDrives) {
             return
         }
 
+        if ($summary.SizeDiffCount -gt 0) {
+            Write-LogLocal "[$drv] Bỏ qua hash do có $($summary.SizeDiffCount) file lệch dung lượng." "WARN"
+            $summary.Status = "Mismatch"
+            Write-Output $summary
+            return
+        }
+
         # ================= HASH CHECK =================
 
         $common = @()
@@ -440,10 +447,12 @@ Write-Host ""
 Write-Host "===== TỔNG KẾT CHECK =====" -ForegroundColor Cyan
 
 $overallOK = $true
+$exitCode  = 0
 
 if ($summaries.Count -eq 0) {
     Write-Log "Không thu được summary nào từ job." "ERROR"
     $overallOK = $false
+    $exitCode  = 1
 } else {
     $summaries | Sort-Object Drive | ForEach-Object {
         $d = $_
@@ -465,7 +474,20 @@ if ($summaries.Count -eq 0) {
             Write-Host ("  Hash  : đã check {0} file, mismatch: {1}" -f $d.HashCheckedCount, $d.HashMismatchCount) -ForegroundColor Gray
         }
 
-        if ($d.Status -ne "OK") {
+        if ($d.Status -eq "Error") {
+            $exitCode  = [Math]::Max($exitCode, 1)
+            $overallOK = $false
+        } elseif ($d.MissingCount -gt 0) {
+            $exitCode  = [Math]::Max($exitCode, 4)
+            $overallOK = $false
+        } elseif ($d.ExtraCount -gt 0) {
+            $exitCode  = [Math]::Max($exitCode, 3)
+            $overallOK = $false
+        } elseif ($d.SizeDiffCount -gt 0 -or $d.HashMismatchCount -gt 0) {
+            $exitCode  = [Math]::Max($exitCode, 2)
+            $overallOK = $false
+        } elseif ($d.Status -ne "OK") {
+            $exitCode  = [Math]::Max($exitCode, 1)
             $overallOK = $false
         }
     }
@@ -475,8 +497,8 @@ if (-not $NoPause) {
     Read-Host "Nhấn Enter để thoát..." | Out-Null
 }
 
-if ($overallOK) {
-    exit 0
-} else {
-    exit 1
+if (-not $overallOK) {
+    exit $exitCode
 }
+
+exit 0
