@@ -56,7 +56,7 @@ function Write-Log {
     }
 
     if ($script:LogFile) {
-        Add-Content -Path $script:LogFile -Value $line
+        Add-Content -Path $script:LogFile -Value $line -Encoding utf8
     }
 }
 

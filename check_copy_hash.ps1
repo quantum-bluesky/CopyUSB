@@ -47,7 +47,7 @@ function Write-Log {
     }
 
     if ($LogFile) {
-        Add-Content -Path $LogFile -Value $line
+        Add-Content -Path $LogFile -Value $line -Encoding utf8
     }
 }
 
@@ -188,7 +188,7 @@ foreach ($drv in $DestDrives) {
             }
 
             if ($LogFile) {
-                Add-Content -Path $LogFile -Value $line
+                Add-Content -Path $LogFile -Value $line -Encoding utf8
             }
         }
 
