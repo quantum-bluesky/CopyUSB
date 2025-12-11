@@ -23,6 +23,21 @@
     # Không hỏi confirm (auto yes)
     [switch]$AutoYes
 )
+# Goc thuc thi (de xu ly duong dan tuong doi khi chay tu cwd khac)
+$ScriptDir = if ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { (Get-Location).ProviderPath }
+
+# Chuan hoa duong dan tuong doi thanh tuyet doi (dua tren thu muc script)
+if (-not [System.IO.Path]::IsPathRooted($CheckScriptPath)) {
+    $CheckScriptPath = Join-Path $ScriptDir $CheckScriptPath
+}
+if (-not [System.IO.Path]::IsPathRooted($EjectScriptPath)) {
+    $EjectScriptPath = Join-Path $ScriptDir $EjectScriptPath
+}
+if (-not [System.IO.Path]::IsPathRooted($LogDir)) {
+    $LogDir = Join-Path $ScriptDir $LogDir
+}
+
+
 # ================== HÀM GHI LOG ==================
 function Write-Log {
     param(
@@ -87,6 +102,7 @@ if (-not (Test-Path $LogDir)) {
 }
 $logName = "copycheckeject_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss")
 $script:LogFile = Join-Path $LogDir $logName
+$script:LogFile = [System.IO.Path]::GetFullPath($script:LogFile)
 
 Write-Log "===== BẮT ĐẦU QUY TRÌNH COPY - CHECK - EJECT ====="
 
@@ -157,7 +173,8 @@ function Get-SourceSize {
         "/R:0",
         "/W:0",
         "/NFL",
-        "/NDL"
+        "/NDL",
+        "/NP"
     )
 
     $output = & robocopy @params 
@@ -453,28 +470,28 @@ if (-not (Test-Path $CheckScriptPath)) {
 else {
     Write-Log "BẮT ĐẦU BƯỚC CHECK bằng script: $CheckScriptPath"
 
-    $argList = @(
+    $checkScriptFull = [System.IO.Path]::GetFullPath($CheckScriptPath)
+    $checkArgs = @(
         "-NoProfile", "-ExecutionPolicy", "Bypass",
-        "-File", (Quote-PathArg $CheckScriptPath),
-        "-SourceRoot", (Quote-PathArg $SourceRoot),
+        "-File", $checkScriptFull,
+        "-SourceRoot", $SourceRoot,
         "-DestDrives"
     ) + $PreparedTargets + @(
         "-NoConfirm",
         "-NoPause",
-        "-LogFile", (Quote-PathArg $LogFile)
+        "-LogFile", $LogFile
     )
 
     if ($EnableHash) {
-        $argList += @(
+        $checkArgs += @(
             "-Hash",
             "-HashLastN", $HashLastN,
             "-HashAlgorithm", $HashAlgorithm
         )
     }
 
-    $ps = Start-Process -FilePath "powershell.exe" -ArgumentList ($argList -join ' ') -PassThru -WindowStyle Hidden
-    $ps.WaitForExit()
-    $checkCode = $ps.ExitCode
+    & powershell.exe @checkArgs
+    $checkCode = $LASTEXITCODE
 
     if ($checkCode -ne 0) {
         Write-Log ("BƯỚC CHECK báo lỗi (ExitCode={0}). DỪNG, KHÔNG EJECT." -f $checkCode) "ERROR"
@@ -494,14 +511,14 @@ else {
 
     $drvArgs = $PreparedTargets | ForEach-Object { $_.ToLower() }
 
+    $ejectScriptFull = [System.IO.Path]::GetFullPath($EjectScriptPath)
     $argListEject = @(
         "-NoProfile", "-ExecutionPolicy", "Bypass",
-        "-File", (Quote-PathArg $EjectScriptPath)
+        "-File", $ejectScriptFull
     ) + $drvArgs
 
-    $psEject = Start-Process -FilePath "powershell.exe" -ArgumentList ($argListEject -join ' ') -PassThru
-    $psEject.WaitForExit()
-    $ejectCode = $psEject.ExitCode
+    & powershell.exe @argListEject
+    $ejectCode = $LASTEXITCODE
 
     if ($ejectCode -ne 0) {
         Write-Log ("BƯỚC EJECT có lỗi (ExitCode={0})." -f $ejectCode) "ERROR"
