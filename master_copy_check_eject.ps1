@@ -437,38 +437,33 @@ if ($PreparedTargets.Count -eq 0) {
     exit 1
 }
 
-# ================== BƯỚC 2: COPY (song song) ==================
-Write-Log "BẮT ĐẦU BƯỚC COPY bằng robocopy..."
+# ================== BƯỚC 2: COPY (song song, có phục hồi rút-gắn) ==================
+function Start-CopyProcess {
+    param(
+        [string]$DriveLetter,
+        [bool]$UseMirror,
+        [int]$ThreadNo
+    )
 
-$copyProcesses = @()
-$copyResults = @{}
-
-$threadNo = [int][Math]::Floor(16 / $PreparedTargets.Count)
-if ($threadNo -lt 1) { $threadNo = 1 }
-if ($threadNo -gt 8) { $threadNo = 8 }
-foreach ($drv in $PreparedTargets) {
-    # Đảm bảo ổ đã ready trước khi tạo thư mục & chạy robocopy
-    if (-not (Wait-DriveReady $drv 30)) {
-        Write-Log "Ổ $drv KHÔNG ready trước khi copy. BỎ QUA ổ này." "ERROR"
-        continue
+    if (-not (Wait-DriveReady $DriveLetter 30)) {
+        Write-Log ("Ổ {0} KHÔNG ready trước khi copy." -f $DriveLetter) "ERROR"
+        return $null
     }
-    $destPath = Join-Path $drv (Split-Path $SourceRoot -Leaf)
 
+    $destPath = Join-Path $DriveLetter (Split-Path $SourceRoot -Leaf)
     try {
         if (-not (Test-Path $destPath)) {
             New-Item -Path $destPath -ItemType Directory -Force | Out-Null
         }
     }
     catch {
-        Write-Log "Lỗi khi tạo thư mục đích $destPath trên ổ ${drv}: $_" "ERROR"
-        continue
+        Write-Log "Lỗi khi tạo thư mục đích $destPath trên ổ ${DriveLetter}: $_" "ERROR"
+        return $null
     }
 
     $srcArg = Quote-PathArg $SourceRoot
     $dstArg = Quote-PathArg $destPath
-
-    $useMirror = $MirrorTargets -contains $drv
-    $modeSwitch = if ($useMirror) { "/MIR" } else { "/E" }
+    $modeSwitch = if ($UseMirror) { "/MIR" } else { "/E" }
 
     $params = @(
         $srcArg,
@@ -481,11 +476,8 @@ foreach ($drv in $PreparedTargets) {
         "/NDL",
         "/NP",
         "/Z",
-        "/MT:$threadNo"
+        "/MT:$ThreadNo"
     )
-    if ($useMirror) {
-        Write-Log ("Copy ổ {0} được chạy với mode MIRROR (do quick check ExitCode=3)." -f $drv) "WARN"
-    }
     #giải thích tham số:
     # /E: copy toàn bộ cây thư mục, bao gồm thư mục rỗng
     # /R:2: retry 2 lần nếu lỗi
@@ -497,29 +489,84 @@ foreach ($drv in $PreparedTargets) {
     # /Z: copy ở chế độ restartable
     # /MT:16: copy đa luồng (16 luồng)
 
-    Write-Log ("Chạy robocopy tới {0}: robocopy {1}" -f $drv, ($params -join ' '))
-    $p = Start-Process -FilePath "robocopy.exe" -ArgumentList ($params -join ' ') -PassThru -WindowStyle Hidden
-    $copyProcesses += [PSCustomObject]@{
-        Drive    = $drv
-        Process  = $p
-        DestPath = $destPath
+    if ($UseMirror) {
+        Write-Log ("Copy ổ {0} chạy MIRROR (do quick check ExitCode=3)." -f $DriveLetter) "WARN"
     }
-    # Giãn thời gian khởi tạo process để tránh tranh chấp tài nguyên
-    Start-Sleep -Milliseconds 500
+
+    Write-Log ("Chạy robocopy tới {0}: robocopy {1}" -f $DriveLetter, ($params -join ' '))
+    $p = Start-Process -FilePath "robocopy.exe" -ArgumentList ($params -join ' ') -PassThru -WindowStyle Hidden
+    return [PSCustomObject]@{
+        Drive     = $DriveLetter
+        Process   = $p
+        UseMirror = $UseMirror
+    }
 }
 
-foreach ($cp in $copyProcesses) {
-    $p = $cp.Process
-    $drv = $cp.Drive
-    $p.WaitForExit()
-    $code = $p.ExitCode
-    $copyResults[$drv] = $code
+Write-Log "BẮT ĐẦU BƯỚC COPY (robocopy)..."
 
-    if ($code -ge 8) {
-        Write-Log ("COPY tới {0} THẤT BẠI. ExitCode={1}" -f $drv, $code) "ERROR"
+$copyResults = @{}
+$active = @()
+$threadNo = [int][Math]::Floor(16 / $PreparedTargets.Count)
+if ($threadNo -lt 1) { $threadNo = 1 }
+if ($threadNo -gt 8) { $threadNo = 8 }
+
+# Khởi động copy cho tất cả ổ (song song)
+foreach ($drv in $PreparedTargets) {
+    $useMirror = $MirrorTargets -contains $drv
+    $procObj = Start-CopyProcess -DriveLetter $drv -UseMirror $useMirror -ThreadNo $threadNo
+    if ($procObj) {
+        $active += $procObj
+    } else {
+        $copyResults[$drv] = 999
+    }
+    Start-Sleep -Milliseconds 300
+}
+
+# Giám sát tiến trình copy theo ổ
+while ($active.Count -gt 0) {
+    $procs = $active | Select-Object -ExpandProperty Process
+    $finished = Wait-Process -InputObject $procs -Any
+    $done = $active | Where-Object { $_.Process.Id -eq $finished.Id }
+    if (-not $done) { continue }
+
+    $drv = $done.Drive
+    $code = $done.Process.ExitCode
+    $copyResults[$drv] = $code
+    $active = $active | Where-Object { $_.Process.Id -ne $finished.Id }
+
+    if ($code -lt 8) {
+        Write-Log ("COPY tới {0} HOÀN TẤT. ExitCode={1}" -f $drv, $code)
+        continue
+    }
+
+    Write-Log ("COPY tới {0} THẤT BẠI. ExitCode={1}" -f $drv, $code) "ERROR"
+    if ($AutoYes) {
+        Write-Log "AutoYes đang bật -> không thử lại copy cho ổ này." "ERROR"
+        continue
+    }
+
+    $stillThere = Test-Path ($drv + "\")
+    if (-not $stillThere) {
+        Write-Log ("Ổ {0} không còn sẵn sàng (có thể bị rút). Cắm lại để thử lại." -f $drv) "ERROR"
+    }
+
+    $ans = Read-Host ("Ổ {0} gặp lỗi (ExitCode={1}). Cắm lại ổ nếu đã rút, nhập Y để thử copy lại, phím khác = bỏ qua ổ này" -f $drv, $code)
+    if ($ans -and $ans.ToUpper() -eq 'Y') {
+        if (-not (Wait-DriveReady $drv 60)) {
+            Write-Log ("Ổ {0} vẫn không sẵn sàng sau 60s. Bỏ qua ổ này." -f $drv) "ERROR"
+            continue
+        }
+        Write-Log ("Thử copy lại ổ {0}..." -f $drv)
+        $retryProc = Start-CopyProcess -DriveLetter $drv -UseMirror ($MirrorTargets -contains $drv) -ThreadNo $threadNo
+        if ($retryProc) {
+            $copyResults.Remove($drv) | Out-Null
+            $active += $retryProc
+        } else {
+            Write-Log ("Khởi động copy lại ổ {0} thất bại, giữ nguyên lỗi trước đó." -f $drv) "ERROR"
+        }
     }
     else {
-        Write-Log ("COPY tới {0} HOÀN TẤT. ExitCode={1}" -f $drv, $code)
+        Write-Log ("Người dùng chọn bỏ qua copy cho ổ {0}." -f $drv) "WARN"
     }
 }
 
@@ -529,7 +576,6 @@ if ($copyResults.Values | Where-Object { $_ -ge 8 }) {
 }
 
 Write-Log "Tất cả copy robocopy hoàn tất (không lỗi mức >=8)."
-
 # ================== BƯỚC 3: CHECK ==================
 if (-not (Test-Path $CheckScriptPath)) {
     Write-Log "Không tìm thấy script CHECK: $CheckScriptPath. Bỏ qua bước CHECK." "WARN"
