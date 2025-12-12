@@ -17,6 +17,10 @@
     # Đường dẫn script EJECT
     [string]$EjectScriptPath = ".\removedrv.ps1",
 
+    # Đường dẫn script remount USB (dùng để capture / remount)
+    [string]$RemountScriptPath = ".\Remount-Usb.ps1",
+    [string]$RemountCachePath  = ".\usb_remount_cache.json",
+
     # Thư mục log
     [string]$LogDir = ".\logs",
 
@@ -33,9 +37,24 @@ if (-not [System.IO.Path]::IsPathRooted($CheckScriptPath)) {
 if (-not [System.IO.Path]::IsPathRooted($EjectScriptPath)) {
     $EjectScriptPath = Join-Path $ScriptDir $EjectScriptPath
 }
+if (-not [System.IO.Path]::IsPathRooted($RemountScriptPath)) {
+    $RemountScriptPath = Join-Path $ScriptDir $RemountScriptPath
+}
+if (-not [System.IO.Path]::IsPathRooted($RemountCachePath)) {
+    $RemountCachePath = Join-Path $ScriptDir $RemountCachePath
+}
 if (-not [System.IO.Path]::IsPathRooted($LogDir)) {
     $LogDir = Join-Path $ScriptDir $LogDir
 }
+
+# Kiểm tra quyền admin (phục vụ cảnh báo remount)
+$script:IsAdmin = $false
+try {
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = [Security.Principal.WindowsPrincipal]::new($id)
+    $script:IsAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+catch { $script:IsAdmin = $false }
 
 
 # ================== HÀM GHI LOG ==================
@@ -134,11 +153,19 @@ Write-Host "SourceRoot      : $SourceRoot"
 Write-Host "DestDrives      : $($DestDrives -join ', ')"
 Write-Host "CheckScriptPath : $CheckScriptPath"
 Write-Host "EjectScriptPath : $EjectScriptPath"
+Write-Host "RemountScript   : $RemountScriptPath"
+Write-Host "RemountCache    : $RemountCachePath"
 Write-Host "LogFile         : $LogFile"
 Write-Host "EnableHash      : $($EnableHash.IsPresent)"
 Write-Host "HashLastN       : $HashLastN"
 Write-Host "HashAlgorithm   : $HashAlgorithm"
 Write-Host ""
+if ((Test-Path $RemountScriptPath) -and (-not $script:IsAdmin)) {
+    Write-Host "LƯU Ý: Để remount USB khi bị rút/mất kết nối, hãy chạy PowerShell 'Run as Administrator'." -ForegroundColor Yellow
+    Write-Log  "Lưu ý: cần quyền Administrator để remount USB khi bị rút/mất kết nối." "WARN"
+}
+
+
 
 if (-not $AutoYes) {
     $confirm = Read-Host "Tiếp tục với cấu hình trên? (Y/N, mặc định = Y)"
@@ -242,6 +269,27 @@ foreach ($drv in $DestDrives) {
 if ($ValidTargets.Count -eq 0) {
     Write-Log "Không có ổ USB hợp lệ để xử lý." "ERROR"
     exit 1
+}
+
+# ================== CAPTURE THÔNG TIN REMOUNT ==================
+if (Test-Path $RemountScriptPath) {
+    Write-Log "Capture thông tin remount cho các ổ USB hợp lệ..."
+    foreach ($drv in $ValidTargets) {
+        try {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $RemountScriptPath -Mode Capture -Drive $drv -CachePath $RemountCachePath
+            $capCode = $LASTEXITCODE
+            if ($capCode -eq 0) {
+                Write-Log ("Capture remount OK cho ổ {0}, cache: {1}" -f $drv, $RemountCachePath)
+            } else {
+                Write-Log ("Capture remount cho ổ {0} thất bại (ExitCode={1}). Tiếp tục mà không có cache remount cho ổ này." -f $drv, $capCode) "WARN"
+            }
+        }
+        catch {
+            Write-Log ("Lỗi khi capture remount ổ {0}: {1}" -f $drv, $_) "WARN"
+        }
+    }
+} else {
+    Write-Log "Không tìm thấy Remount-Usb.ps1, bỏ qua bước capture remount." "WARN"
 }
 
 # ================== CẢNH BÁO RIÊNG CHO Ổ USB >= 16GB ==================

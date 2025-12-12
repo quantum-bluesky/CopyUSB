@@ -1,7 +1,16 @@
 ﻿param(
   [Parameter(Mandatory=$true)]
+  [ValidateSet("Capture","Remount")]
+  [string]$Mode,
+
+  [Parameter(Mandatory=$true)]
   [ValidatePattern("^[A-Za-z]:?$")]
-  [string]$Drive = "F:"
+  [string]$Drive,
+
+  [string]$CachePath = "$PSScriptRoot\usb_remount_cache.json",
+
+  # thời gian chờ mount lại
+  [int]$WaitSec = 12
 )
 
 function Assert-Admin {
@@ -12,104 +21,84 @@ function Assert-Admin {
   }
 }
 
-function Normalize-Letter([string]$d) {
-  $d.Trim().TrimEnd(':').ToUpper()
-}
+function Normalize-Letter([string]$d) { $d.Trim().TrimEnd(':').ToUpper() }
 
-function Wait-Drive([string]$letter, [int]$timeoutSec = 8) {
+function Wait-Drive([string]$letter, [int]$timeoutSec) {
   $deadline = (Get-Date).AddSeconds($timeoutSec)
   while((Get-Date) -lt $deadline) {
     if (Test-Path -LiteralPath ("{0}:\\" -f $letter)) { return $true }
-    Start-Sleep -Milliseconds 300
+    Start-Sleep -Milliseconds 250
   }
   return $false
 }
 
 function Rescan-Storage {
   try { Update-HostStorageCache | Out-Null } catch {}
-  $dp = "rescan"
-  $dp | diskpart | Out-Null
-}
-
-function Get-MountedDevices-VolumeGuidForLetter([string]$letter) {
-  # Trả về dạng \\?\Volume{GUID}\ nếu tìm thấy mapping \DosDevices\F:
-  $regPath = "HKLM:\SYSTEM\MountedDevices"
-  $name = "\DosDevices\$letter`:"
-  try {
-    $raw = (Get-ItemProperty -Path $regPath -Name $name -ErrorAction Stop).$name
-  } catch { return $null }
-
-  # raw là byte[] kiểu REG_BINARY. Ta cố map ngược sang volume GUID bằng cách so sánh value.
-  $props = Get-ItemProperty -Path $regPath
-  foreach ($p in $props.PSObject.Properties) {
-    if ($p.Name -like "\\??\\Volume{*}" -and $p.Value -is [byte[]]) {
-      if ($p.Value.Length -eq $raw.Length) {
-        $same = $true
-        for ($i=0; $i -lt $raw.Length; $i++) {
-          if ($raw[$i] -ne $p.Value[$i]) { $same = $false; break }
-        }
-        if ($same) {
-          # Registry dùng \??\Volume{GUID}\ ; PowerShell volume path hay dùng \\?\Volume{GUID}\
-          return ($p.Name -replace '^\\\?\?\\', '\\?\')  # \??\ -> \?\
-        }
-      }
-    }
-  }
-  return $null
+  "rescan" | diskpart | Out-Null
 }
 
 function Ensure-Letter-Free([string]$letter) {
   $vol = Get-Volume -ErrorAction SilentlyContinue | Where-Object DriveLetter -eq $letter
   if ($vol) {
-    throw "Drive letter $letter`: đang bị ổ khác dùng (Volume: $($vol.FileSystemLabel)). Hãy đổi letter hoặc giải phóng trước."
+    throw "Drive letter $letter`: đang bị ổ khác dùng (Label: $($vol.FileSystemLabel)). Hãy giải phóng/đổi letter trước."
   }
 }
 
-function Try-AssignLetter-ByVolumeGuid([string]$volumeGuidPath, [string]$letter) {
-  if (-not $volumeGuidPath) { return $false }
-
-  # volumeGuidPath dạng \\?\Volume{GUID}\  (hoặc \?\Volume{GUID}\ tuỳ replace)
-  $guid = $volumeGuidPath
-  if ($guid -notmatch 'Volume\{[0-9a-fA-F-]+\}\\?$') { }
-
-  $vol = Get-Volume -ErrorAction SilentlyContinue | Where-Object { $_.UniqueId -eq $guid }
-  if (-not $vol) { return $false }
-
-  # Lấy partition tương ứng để set letter
-  $part = Get-Partition -ErrorAction SilentlyContinue | Where-Object { $_.AccessPaths -contains $guid }
-  if (-not $part) { return $false }
-
-  # Đưa disk online/readonly off nếu cần
-  try {
-    $disk = Get-Disk -Number $part.DiskNumber -ErrorAction Stop
-    if ($disk.IsOffline)  { Set-Disk -Number $disk.Number -IsOffline $false -ErrorAction SilentlyContinue | Out-Null }
-    if ($disk.IsReadOnly) { Set-Disk -Number $disk.Number -IsReadOnly $false -ErrorAction SilentlyContinue | Out-Null }
-  } catch {}
-
-  Ensure-Letter-Free $letter
-  try {
-    Set-Partition -DiskNumber $part.DiskNumber -PartitionNumber $part.PartitionNumber -NewDriveLetter $letter -ErrorAction Stop
-    return $true
-  } catch {
-    return $false
-  }
-}
-
-function Reset-Only-UsbDiskByDiskNumber([int]$diskNumber) {
-  # Map DiskNumber -> Win32_DiskDrive.Index -> PNPDeviceID (chỉ đúng thiết bị đó)
-  $dd = Get-CimInstance Win32_DiskDrive -ErrorAction SilentlyContinue |
-    Where-Object { $_.Index -eq $diskNumber -and ($_.InterfaceType -eq "USB" -or $_.PNPDeviceID -like "USBSTOR*") } |
+function Get-DiskDriveCimByIndex([int]$idx) {
+  Get-CimInstance Win32_DiskDrive -ErrorAction SilentlyContinue |
+    Where-Object { $_.Index -eq $idx } |
     Select-Object -First 1
+}
 
-  if (-not $dd) { return $false }
+function Capture-UsbState([string]$letter, [string]$path) {
+  if (-not (Test-Path ("$letter`:\"))) { throw "Không thấy $letter`:\. Hãy capture khi ổ đang mount." }
 
-  $pnpId = $dd.PNPDeviceID
+  $vol = Get-Volume -DriveLetter $letter -ErrorAction Stop
+  $part = Get-Partition -DriveLetter $letter -ErrorAction Stop
+  $disk = Get-Disk -Number $part.DiskNumber -ErrorAction Stop
+
+  # Win32_DiskDrive.Index thường trùng Disk.Number cho USB storage như output bạn gửi
+  $dd = Get-DiskDriveCimByIndex $disk.Number
+  $serial = $null
+  $pnpId  = $null
+  $iface  = $null
+  if ($dd) {
+    $serial = ($dd.SerialNumber | ForEach-Object { $_.Trim() })
+    $pnpId  = $dd.PNPDeviceID
+    $iface  = $dd.InterfaceType
+  }
+
+  $entry = [ordered]@{
+    DriveLetter      = $letter
+    CapturedAt       = (Get-Date).ToString("s")
+    VolumeUniqueId   = $vol.UniqueId            # \\?\Volume{GUID}\
+    FileSystem       = $vol.FileSystem
+    Label            = $vol.FileSystemLabel
+    VolumeSize       = [int64]$vol.Size
+    DiskNumber       = [int]$disk.Number
+    DiskFriendlyName = $disk.FriendlyName
+    DiskBusType      = $disk.BusType.ToString()
+    DiskSize         = [int64]$disk.Size
+    PnpDeviceId      = $pnpId                   # để reset đúng device (không đụng ổ khác)
+    DiskSerial       = $serial                  # nếu có
+    InterfaceType    = $iface
+  }
+
+  $cache = @{}
+  if (Test-Path $path) {
+    try { $cache = (Get-Content $path -Raw | ConvertFrom-Json -AsHashtable) } catch { $cache = @{} }
+  }
+  $cache[$letter] = $entry
+  ($cache | ConvertTo-Json -Depth 6) | Set-Content -Path $path -Encoding UTF8
+
+  Write-Host "OK: Đã capture $letter`: -> $path"
+  Write-Host ("    Disk# {0}, Size {1:N1}GB, BusType {2}, Serial '{3}'" -f $entry.DiskNumber, ($entry.DiskSize/1GB), $entry.DiskBusType, ($entry.DiskSerial ?? ""))
+}
+
+function Try-Reset-OnlyDevice([string]$pnpId) {
   if (-not $pnpId) { return $false }
-
   $dev = Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
-    Where-Object { $_.InstanceId -eq $pnpId } |
-    Select-Object -First 1
-
+    Where-Object { $_.InstanceId -eq $pnpId } | Select-Object -First 1
   if (-not $dev) { return $false }
 
   try {
@@ -118,76 +107,108 @@ function Reset-Only-UsbDiskByDiskNumber([int]$diskNumber) {
     Enable-PnpDevice -InstanceId $dev.InstanceId -Confirm:$false -ErrorAction Stop
     return $true
   } catch {
-    # "Generic failure" rất hay gặp nếu Windows không cho reset device đó theo cách này
     return $false
   }
 }
 
-# ================= MAIN =================
+function Find-DiskMatch($entry) {
+  # Ưu tiên: Serial -> PNPDeviceID -> (FriendlyName + Size)
+  $allDd = Get-CimInstance Win32_DiskDrive -ErrorAction SilentlyContinue
+
+  if ($entry.DiskSerial) {
+    $m = $allDd | Where-Object { ($_.SerialNumber -as [string]).Trim() -like "*$($entry.DiskSerial)*" } | Select-Object -First 1
+    if ($m) { return [int]$m.Index }
+  }
+
+  if ($entry.PnpDeviceId) {
+    $m = $allDd | Where-Object { $_.PNPDeviceID -eq $entry.PnpDeviceId } | Select-Object -First 1
+    if ($m) { return [int]$m.Index }
+  }
+
+  if ($entry.DiskSize -and $entry.DiskFriendlyName) {
+    $m = $allDd | Where-Object {
+      $_.Model -eq $entry.DiskFriendlyName -and
+      $_.Size -and ([int64]$_.Size -ge ($entry.DiskSize*0.98)) -and ([int64]$_.Size -le ($entry.DiskSize*1.02))
+    } | Select-Object -First 1
+    if ($m) { return [int]$m.Index }
+  }
+
+  return $null
+}
+
+function Remount-FromCache([string]$letter, [string]$path, [int]$waitSec) {
+  if (Wait-Drive $letter 1) { Write-Host "OK: $letter`: đã đang mount."; return }
+
+  if (-not (Test-Path $path)) { throw "Không thấy cache file: $path. Hãy chạy -Mode Capture trước." }
+  $cache = Get-Content $path -Raw | ConvertFrom-Json -AsHashtable
+  if (-not $cache.ContainsKey($letter)) { throw "Cache không có entry cho $letter`:. Hãy Capture ổ đó khi đang mount." }
+  $entry = $cache[$letter]
+
+  Ensure-Letter-Free $letter
+
+  Write-Host "Loaded cache for $letter`: (CapturedAt $($entry.CapturedAt))"
+  Write-Host ("  DiskFriendlyName: {0}; DiskSize: {1:N1}GB; Serial: '{2}'" -f $entry.DiskFriendlyName, ($entry.DiskSize/1GB), ($entry.DiskSerial ?? ""))
+
+  # 1) Rescan + chờ Windows tự mount lại
+  Rescan-Storage
+  if (Wait-Drive $letter 4) { Write-Host "OK: $letter`: đã mount sau rescan."; return }
+
+  # 2) Tìm đúng disk theo cache
+  $diskIndex = Find-DiskMatch $entry
+  if ($diskIndex -eq $null) {
+    Write-Host "FAIL: Không tìm thấy disk match từ cache (serial/pnp/model+size)."
+    Write-Host "Gợi ý: Capture lại khi ổ đang mount để có Serial/PNPDeviceID tốt hơn."
+    return
+  }
+
+  # 3) Thử assign letter cho partition phù hợp trên disk đó
+  $disk = Get-Disk -Number $diskIndex -ErrorAction SilentlyContinue
+  if ($disk) {
+    if ($disk.IsOffline)  { Set-Disk -Number $disk.Number -IsOffline $false -ErrorAction SilentlyContinue | Out-Null }
+    if ($disk.IsReadOnly) { Set-Disk -Number $disk.Number -IsReadOnly $false -ErrorAction SilentlyContinue | Out-Null }
+  }
+
+  # Chọn partition “hợp lý”: có Volume/Filesystem (nếu đọc được)
+  $parts = Get-Partition -DiskNumber $diskIndex -ErrorAction SilentlyContinue |
+    Where-Object { -not $_.DriveLetter -and $_.Size -gt 0 } |
+    Sort-Object Size -Descending
+
+  foreach ($p in $parts) {
+    try {
+      Set-Partition -DiskNumber $diskIndex -PartitionNumber $p.PartitionNumber -NewDriveLetter $letter -ErrorAction Stop
+      if (Wait-Drive $letter $waitSec) { Write-Host "OK: Remount thành công -> $letter`:\ (Disk#$diskIndex Part#$($p.PartitionNumber))"; return }
+    } catch {}
+  }
+
+  # 4) Nếu vẫn chưa: reset đúng device theo PNPDeviceID trong cache (KHÔNG đụng ổ khác)
+  Write-Host "==> Try reset ONLY target device (from cache PNPDeviceID)..."
+  [void](Try-Reset-OnlyDevice $entry.PnpDeviceId)
+  Start-Sleep -Seconds 2
+  Rescan-Storage
+
+  # Thử lại assign
+  $parts = Get-Partition -DiskNumber $diskIndex -ErrorAction SilentlyContinue |
+    Where-Object { -not $_.DriveLetter -and $_.Size -gt 0 } |
+    Sort-Object Size -Descending
+
+  foreach ($p in $parts) {
+    try {
+      Set-Partition -DiskNumber $diskIndex -PartitionNumber $p.PartitionNumber -NewDriveLetter $letter -ErrorAction Stop
+      if (Wait-Drive $letter $waitSec) { Write-Host "OK: Remount thành công sau reset -> $letter`:\ (Disk#$diskIndex Part#$($p.PartitionNumber))"; return }
+    } catch {}
+  }
+
+  # Final wait tránh false FAIL do mount trễ
+  if (Wait-Drive $letter $waitSec) { Write-Host "OK: $letter`: đã mount (mount trễ)."; return }
+
+  Write-Host "FAIL: Không remount được $letter`: dựa trên cache."
+}
+
+# ===== MAIN =====
 Assert-Admin
 $L = Normalize-Letter $Drive
 
-# 0) Nếu đã lên rồi thì OK luôn (và tránh “FAIL sai”)
-if (Wait-Drive $L 1) {
-  Write-Host "OK: $L`: đã đang mount."
-  exit 0
+switch ($Mode) {
+  "Capture" { Capture-UsbState $L $CachePath }
+  "Remount" { Remount-FromCache $L $CachePath $WaitSec }
 }
-
-# 1) Lấy Volume GUID mà trước đây letter này trỏ tới (nếu registry còn lưu)
-$targetVolGuid = Get-MountedDevices-VolumeGuidForLetter $L
-if ($targetVolGuid) {
-  Write-Host "Target volume (from MountedDevices): $targetVolGuid"
-} else {
-  Write-Host "Không tìm thấy mapping trong MountedDevices cho $L`:. (Có thể Windows đã xoá mapping)"
-}
-
-# 2) Rescan + thử gán đúng volume GUID (nếu có)
-Write-Host "==> Rescan..."
-Rescan-Storage
-
-if (Wait-Drive $L 4) {
-  Write-Host "OK: $L`: đã mount sau rescan."
-  exit 0
-}
-
-if (Try-AssignLetter-ByVolumeGuid $targetVolGuid $L) {
-  if (Wait-Drive $L 6) {
-    Write-Host "OK: Remount thành công -> $L`:\"
-    exit 0
-  }
-}
-
-# 3) Nếu chưa được: chỉ reset đúng USB disk tương ứng (nếu xác định được DiskNumber từ volume GUID)
-$diskNumber = $null
-if ($targetVolGuid) {
-  $part = Get-Partition -ErrorAction SilentlyContinue | Where-Object { $_.AccessPaths -contains $targetVolGuid } | Select-Object -First 1
-  if ($part) { $diskNumber = $part.DiskNumber }
-}
-
-if ($diskNumber -ne $null) {
-  Write-Host "==> Reset only target USB disk (Disk #$diskNumber)..."
-  [void](Reset-Only-UsbDiskByDiskNumber $diskNumber)
-  Start-Sleep -Seconds 2
-
-  Write-Host "==> Rescan..."
-  Rescan-Storage
-
-  if (Try-AssignLetter-ByVolumeGuid $targetVolGuid $L -or (Wait-Drive $L 6)) {
-    if (Wait-Drive $L 6) {
-      Write-Host "OK: Remount thành công -> $L`:\"
-      exit 0
-    }
-  }
-} else {
-  Write-Host "Không xác định được DiskNumber của target -> không reset bừa các USB khác."
-}
-
-# 4) Final check (tránh FAIL sai do mount trễ)
-if (Wait-Drive $L 8) {
-  Write-Host "OK: $L`: đã mount (mount trễ)."
-  exit 0
-}
-
-Write-Host "FAIL: Không remount được USB về $L`:."
-Write-Host "Gợi ý: mapping ${L}: có thể không còn trong MountedDevices; hãy chạy lại khi USB vẫn cắm, hoặc dùng thêm tiêu chí (label/serial)."
-exit 1
