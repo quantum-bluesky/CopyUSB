@@ -115,6 +115,36 @@ function Quote-PathArg {
 
     return '"{0}"' -f $normalized
 }
+
+# Thử remount USB dựa trên cache (Remount-Usb.ps1)
+function Try-RemountDrive {
+    param(
+        [string]$DriveLetter,
+        [int]$WaitSec = 20
+    )
+
+    if (-not (Test-Path $RemountScriptPath)) {
+        return $false
+    }
+
+    Write-Log ("Thử remount ổ {0}..." -f $DriveLetter) "WARN"
+    try {
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $RemountScriptPath -Mode Remount -Drive $DriveLetter -CachePath $RemountCachePath -WaitSec $WaitSec
+        $code = $LASTEXITCODE
+    }
+    catch {
+        Write-Log ("Lỗi khi chạy Remount-Usb cho ổ {0}: {1}" -f $DriveLetter, $_) "ERROR"
+        return $false
+    }
+
+    if ($code -eq 0 -and (Wait-DriveReady $DriveLetter $WaitSec)) {
+        Write-Log ("Remount ổ {0} thành công." -f $DriveLetter)
+        return $true
+    }
+
+    Write-Log ("Remount ổ {0} thất bại (ExitCode={1})." -f $DriveLetter, $code) "WARN"
+    return $false
+}
 # ================== KHỞI TẠO LOG ==================
 if (-not (Test-Path $LogDir)) {
     New-Item -Path $LogDir -ItemType Directory -Force | Out-Null
@@ -495,7 +525,11 @@ function Start-CopyProcess {
 
     if (-not (Wait-DriveReady $DriveLetter 30)) {
         Write-Log ("Ổ {0} KHÔNG ready trước khi copy." -f $DriveLetter) "ERROR"
-        return $null
+        if (Try-RemountDrive -DriveLetter $DriveLetter -WaitSec 30) {
+            Write-Log ("Ổ {0} đã remount, tiếp tục copy." -f $DriveLetter) "WARN"
+        } else {
+            return $null
+        }
     }
 
     $destPath = Join-Path $DriveLetter (Split-Path $SourceRoot -Leaf)
@@ -595,10 +629,22 @@ while ($active.Count -gt 0) {
 
     $stillThere = Test-Path ($drv + "\")
     if (-not $stillThere) {
-        Write-Log ("Ổ {0} không còn sẵn sàng (có thể bị rút). Cắm lại để thử lại." -f $drv) "ERROR"
+        Write-Log ("Ổ {0} không còn sẵn sàng (có thể bị rút). Thử remount..." -f $drv) "ERROR"
+        $remounted = Try-RemountDrive -DriveLetter $drv -WaitSec 30
+        if ($remounted) {
+            Write-Log ("Remount ổ {0} thành công, thử copy lại..." -f $drv) "WARN"
+            $retryProc = Start-CopyProcess -DriveLetter $drv -UseMirror ($MirrorTargets -contains $drv) -ThreadNo $threadNo
+            if ($retryProc) {
+                $copyResults.Remove($drv) | Out-Null
+                $active += $retryProc
+                continue
+            } else {
+                Write-Log ("Khởi động copy lại ổ {0} sau remount thất bại." -f $drv) "ERROR"
+            }
+        }
     }
 
-    $ans = Read-Host ("Ổ {0} gặp lỗi (ExitCode={1}). Cắm lại ổ nếu đã rút, nhập Y để thử copy lại, phím khác = bỏ qua ổ này" -f $drv, $code)
+    $ans = Read-Host ("Ổ {0} gặp lỗi (ExitCode={1}). Cắm lại/Remount nếu đã rút, nhập Y để thử copy lại, phím khác = bỏ qua ổ này" -f $drv, $code)
     if ($ans -and $ans.ToUpper() -eq 'Y') {
         if (-not (Wait-DriveReady $drv 60)) {
             Write-Log ("Ổ {0} vẫn không sẵn sàng sau 60s. Bỏ qua ổ này." -f $drv) "ERROR"
