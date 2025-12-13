@@ -1,26 +1,54 @@
 <#
 Mp3FatSort.ps1 - FAT directory order checker/sorter using YAFS (XML tree)
-- Skip: "System Volume Information" directory, and "desktop.ini" file
-- Sort rule: dir-first, natural sort by long_name (fallback short_name)
-- Modes:
-  - CheckOnly
-  - SortOnlyAuto
-  - SortOnlyFromTree
-  - CheckAndSort (auto, with confirmation unless -Force)
 
-Exit codes:
+Features
+- Uses YAFS to read/write FAT directory order via XML tree:
+    yafs -d e: -r -f tree.xml
+    yafs -d e: -w -f tree_sorted.xml
+- Skip:
+    * Directory: "System Volume Information"
+    * File     : "desktop.ini"
+- Sort by "long file name" (long_name), fallback short_name
+- Natural sort (01,02,03,...,10,11,...) with case-insensitive compare
+- Sort scope options:
+    * Both        : sort <directory> + <file> siblings at each level (dir-first)
+    * FoldersOnly : only sort directories; keep file order as-is
+    * FilesOnly   : only sort files; keep folder order as-is
+
+Modes
+- CheckOnly        : read device, check sorted status (no write)
+- SortOnlyAuto     : read device, generate sorted tree, write to device
+- SortOnlyFromTree : write a provided tree file to device (no read/check unless you do it)
+- CheckAndSort     : read device, check; if NG then sort+write; verify again
+
+Exit codes
   0 = OK (already sorted / check pass)
-  1 = NG (not sorted)  [used for CheckOnly]
+  1 = NG (not sorted) [used for CheckOnly]
   2 = SORTED (changes applied to device)
   3 = CANCELLED (user chose No at confirm)
-  4 = ERROR (unexpected failure)
+  4 = ERROR (unexpected failure, verify fail, yafs failure, etc.)
+
+Examples
+  # Check folders + files
+  .\Mp3FatSort.ps1 -YafsPath "C:\Tools\yafs\yafs.exe" -Device "e:" -Mode CheckOnly
+
+  # Check & auto-fix (no confirm)
+  .\Mp3FatSort.ps1 -YafsPath "C:\Tools\yafs\yafs.exe" -Device "e:" -Mode CheckAndSort -Force
+
+  # Only sort folders, keep file order inside
+  .\Mp3FatSort.ps1 -YafsPath "C:\Tools\yafs\yafs.exe" -Device "e:" -Mode CheckAndSort -SortScope FoldersOnly -Force
+
+  # Only sort files, keep folder order
+  .\Mp3FatSort.ps1 -YafsPath "C:\Tools\yafs\yafs.exe" -Device "e:" -Mode CheckAndSort -SortScope FilesOnly -Force
+
+  # Apply a prepared tree file
+  .\Mp3FatSort.ps1 -YafsPath "C:\Tools\yafs\yafs.exe" -Device "e:" -Mode SortOnlyFromTree -TreeIn ".\tree_sorted.xml" -Force
 #>
 
-[CmdletBinding(DefaultParameterSetName="CheckOnly")]
+[CmdletBinding()]
 param(
   # YAFS exe path
-  [Parameter(Mandatory=$true)]
-  [string]$YafsPath,
+  [string]$YafsPath="C:\Tools\yafs\yafs.exe",
 
   # Drive letter like "e:" (exactly as YAFS expects)
   [Parameter(Mandatory=$true)]
@@ -32,6 +60,13 @@ param(
   [ValidateSet("CheckOnly","SortOnlyAuto","SortOnlyFromTree","CheckAndSort")]
   [string]$Mode,
 
+  # Sort scope
+  # - Both        : sort directory + file at every level (default)
+  # - FoldersOnly : only sort <directory> siblings; keep <file> order as-is
+  # - FilesOnly   : only sort <file> siblings; keep <directory> order as-is
+  [ValidateSet("Both","FoldersOnly","FilesOnly")]
+  [string]$SortScope = "Both",
+
   # Where to dump current tree (from yafs -r). Default: .\tree.xml
   [string]$TreeOut = (Join-Path (Get-Location) "tree.xml"),
 
@@ -41,7 +76,7 @@ param(
   # Tree file to apply (for SortOnlyFromTree). If omitted, use -SortedTreeOut
   [string]$TreeIn,
 
-  # Confirm before writing to device (used by CheckAndSort unless -Force)
+  # Confirm before writing to device (unless -Force)
   [switch]$Force,
 
   # Verbose-ish logging
@@ -73,12 +108,31 @@ function Invoke-YafsWrite([string]$yafs, [string]$device, [string]$inFile) {
   if ($LASTEXITCODE -ne 0) { throw "yafs -w failed with code $LASTEXITCODE" }
 }
 
+function Load-Xml([string]$file) {
+  $xml = New-Object xml
+  $xml.PreserveWhitespace = $true
+  $xml.Load($file)
+  return $xml
+}
+
+function Save-Xml([xml]$xml, [string]$file) {
+  $xml.Save($file)
+}
+
 function Get-Name([xml]$xml, $node) {
-  # Prefer long_name, fallback to short_name
-  $ln = $node.long_name
-  if ($null -ne $ln -and "$ln".Trim().Length -gt 0) { return "$ln".Trim() }
-  $sn = $node.short_name
-  if ($null -ne $sn -and "$sn".Trim().Length -gt 0) { return "$sn".Trim() }
+  # Prefer long_name, fallback short_name
+  # (Avoid $node.long_name property access because under StrictMode it throws when the element is absent.)
+  $lnNode = $node.SelectSingleNode("long_name")
+  if ($null -ne $lnNode) {
+    $ln = $lnNode.InnerText
+    if ($null -ne $ln -and $ln.Trim().Length -gt 0) { return $ln.Trim() }
+  }
+
+  $snNode = $node.SelectSingleNode("short_name")
+  if ($null -ne $snNode) {
+    $sn = $snNode.InnerText
+    if ($null -ne $sn -and $sn.Trim().Length -gt 0) { return $sn.Trim() }
+  }
   return ""
 }
 
@@ -91,7 +145,6 @@ function Should-SkipNode([xml]$xml, $node) {
     if ($n -ieq "System Volume Information") { return $true }
   }
   if (Is-FileNode $node) {
-    # desktop.ini sometimes has only short_name; compare both
     $n = Get-Name $xml $node
     if ($n -ieq "desktop.ini") { return $true }
   }
@@ -99,7 +152,6 @@ function Should-SkipNode([xml]$xml, $node) {
 }
 
 function Natural-KeyParts([string]$s) {
-  # Return array of parts: numbers as [int], others as lowercase string
   $parts = @()
   foreach ($m in [regex]::Split($s, '(\d+)')) {
     if ($m -eq "") { continue }
@@ -129,79 +181,71 @@ function Compare-Natural([string]$a, [string]$b) {
   return 0
 }
 
-function Sort-Siblings([xml]$xml, $parentNode) {
-  # Get children nodes (directory/file) excluding skips
+function Confirm-Apply([string]$device, [string]$file) {
+  $q = "Apply sorted FAT order to device '$device' using tree file '$file'?"
+  $ans = Read-Host "$q (Y/N)"
+  return ($ans -match '^(y|yes)$')
+}
+
+function Sort-ArrayByNaturalName([xml]$xml, [object[]]$arr) {
+  # Insertion sort using Compare-Natural
+  for ($i=1; $i -lt $arr.Count; $i++) {
+    $tmp = $arr[$i]
+    $j = $i - 1
+    while ($j -ge 0 -and (Compare-Natural (Get-Name $xml $arr[$j]) (Get-Name $xml $tmp)) -gt 0) {
+      $arr[$j+1] = $arr[$j]
+      $j--
+    }
+    $arr[$j+1] = $tmp
+  }
+  # Prevent PowerShell from unrolling a single-item array into a scalar XmlElement
+  return ,$arr
+}
+
+function Sort-Siblings([xml]$xml, $parentNode, [string]$sortScope) {
+  # Collect children of interest (dir/file) excluding skips and respecting scope
   $kids = @()
   foreach ($child in @($parentNode.ChildNodes)) {
     if (($child.Name -eq "directory" -or $child.Name -eq "file") -and -not (Should-SkipNode $xml $child)) {
+      if ($sortScope -eq "FoldersOnly" -and $child.Name -ne "directory") { continue }
+      if ($sortScope -eq "FilesOnly"   -and $child.Name -ne "file")      { continue }
       $kids += $child
     }
   }
   if ($kids.Count -eq 0) { return $false }
 
-  $getSortKey = {
-    param($n)
-    $typeRank = if (Is-DirectoryNode $n) { 0 } else { 1 }   # dir first
-    $name = Get-Name $xml $n
-    return @{ typeRank=$typeRank; name=$name }
+  # Build desired order
+  $desired = @()
+
+  if ($sortScope -eq "FoldersOnly" -or $sortScope -eq "FilesOnly") {
+    $desired = Sort-ArrayByNaturalName $xml (@($kids))
   }
-
-  # Current order list (by appearance, not attribute)
-  $current = $kids
-
-  # Desired order using natural compare on name, stable
-  $desired = $kids | Sort-Object `
-    @{Expression = { (& $getSortKey $_).typeRank }}, `
-    @{Expression = { (& $getSortKey $_).name }; Ascending=$true } `
-    -Stable
-
-  # BUT Sort-Object is lexicographic, not natural. We'll do custom natural sort:
-  $desired = $kids | Sort-Object -Stable -Property @{ Expression = {
-      $k = & $getSortKey $_
-      # create a string key for primary sort (typeRank) + name
-      # We will refine tie-breaking with custom natural compare below by using a second pass
-      "{0}|{1}" -f $k.typeRank, $k.name
-    } }
-  # Second pass: custom natural inside same typeRank
-  $desired = $desired | Group-Object { if (Is-DirectoryNode $_) { 0 } else { 1 } } | ForEach-Object {
-    $_.Group | Sort-Object -Stable -Property @{ Expression = { Get-Name $xml $_ } } | ForEach-Object { $_ }
-  }
-
-  # Custom natural compare within each group (replace above lexicographic)
-  $final = New-Object System.Collections.Generic.List[object]
-  foreach ($grp in ($kids | Group-Object { if (Is-DirectoryNode $_) { 0 } else { 1 } } | Sort-Object Name)) {
-    $arr = @($grp.Group)
-    # simple insertion sort with Compare-Natural
-    for ($i=1; $i -lt $arr.Count; $i++) {
-      $tmp = $arr[$i]
-      $j = $i - 1
-      while ($j -ge 0 -and (Compare-Natural (Get-Name $xml $arr[$j]) (Get-Name $xml $tmp)) -gt 0) {
-        $arr[$j+1] = $arr[$j]
-        $j--
-      }
-      $arr[$j+1] = $tmp
+  else {
+    # Both: dir-first, natural sort within each group
+    $desiredDirs = @()
+    $desiredFiles = @()
+    foreach ($k in $kids) {
+      if (Is-DirectoryNode $k) { $desiredDirs += $k } else { $desiredFiles += $k }
     }
-    foreach ($n in $arr) { $final.Add($n) | Out-Null }
+    if ($desiredDirs.Count -gt 0) { $desiredDirs = Sort-ArrayByNaturalName $xml (@($desiredDirs)) }
+    if ($desiredFiles.Count -gt 0) { $desiredFiles = Sort-ArrayByNaturalName $xml (@($desiredFiles)) }
+    $desired = @($desiredDirs + $desiredFiles)
   }
-  $desired = @($final)
-
-  $changed = $false
 
   # Compare current vs desired by reference order
+  $current = $kids
+  $changed = $false
   for ($i=0; $i -lt $current.Count; $i++) {
-    if (-not [object]::ReferenceEquals($current[$i], $desired[$i])) {
-      $changed = $true
-      break
-    }
+    if (-not [object]::ReferenceEquals($current[$i], $desired[$i])) { $changed = $true; break }
   }
 
-  # Reorder in XML by removing + appending (only the non-skipped nodes)
+  # Reorder in XML by removing + appending only the filtered kids
   if ($changed) {
     foreach ($n in $current) { [void]$parentNode.RemoveChild($n) }
     foreach ($n in $desired) { [void]$parentNode.AppendChild($n) }
   }
 
-  # Reassign order attributes 100,200,300... for desired nodes
+  # Reassign order attributes for the nodes we touched
   for ($i=0; $i -lt $desired.Count; $i++) {
     $newOrder = [string](($i+1) * 100)
     if ($desired[$i].GetAttribute("order") -ne $newOrder) {
@@ -213,59 +257,56 @@ function Sort-Siblings([xml]$xml, $parentNode) {
   return $changed
 }
 
-function Walk-Sort([xml]$xml, $node) {
+function Walk-Sort([xml]$xml, $node, [string]$sortScope) {
   $any = $false
-  if (Sort-Siblings $xml $node) { $any = $true }
+  if (Sort-Siblings $xml $node $sortScope) { $any = $true }
 
-  # Walk directories (including ones we skip? We skip sorting inside SVI by skipping the node itself)
   foreach ($child in @($node.ChildNodes)) {
     if ($child.Name -eq "directory" -and -not (Should-SkipNode $xml $child)) {
-      if (Walk-Sort $xml $child) { $any = $true }
+      if (Walk-Sort $xml $child $sortScope) { $any = $true }
     }
   }
   return $any
 }
 
-function Walk-Check([xml]$xml, $node, [string]$path, [ref]$messages) {
+function Walk-Check([xml]$xml, $node, [string]$path, [string]$sortScope, [ref]$messages) {
   $ok = $true
 
-  # children we consider
+  # Children we consider (respect scope)
   $kids = @()
   foreach ($child in @($node.ChildNodes)) {
     if (($child.Name -eq "directory" -or $child.Name -eq "file") -and -not (Should-SkipNode $xml $child)) {
+      if ($sortScope -eq "FoldersOnly" -and $child.Name -ne "directory") { continue }
+      if ($sortScope -eq "FilesOnly"   -and $child.Name -ne "file")      { continue }
       $kids += $child
     }
   }
 
   if ($kids.Count -gt 0) {
-    # actual order (by appearance)
+    # Actual order by appearance
     $actual = $kids | ForEach-Object {
       $t = if (Is-DirectoryNode $_) { "D" } else { "F" }
-      "$t:" + (Get-Name $xml $_)
+      "${t}:" + (Get-Name $xml $_)
     }
 
-    # expected: dir-first then natural by name
+    # Expected order
     $expectedKids = @()
-
-    foreach ($grp in ($kids | Group-Object { if (Is-DirectoryNode $_) { 0 } else { 1 } } | Sort-Object Name)) {
-      $arr = @($grp.Group)
-      # insertion sort by natural
-      for ($i=1; $i -lt $arr.Count; $i++) {
-        $tmp = $arr[$i]; $j = $i - 1
-        while ($j -ge 0 -and (Compare-Natural (Get-Name $xml $arr[$j]) (Get-Name $xml $tmp)) -gt 0) {
-          $arr[$j+1] = $arr[$j]; $j--
-        }
-        $arr[$j+1] = $tmp
-      }
-      $expectedKids += $arr
+    if ($sortScope -eq "FoldersOnly" -or $sortScope -eq "FilesOnly") {
+      $expectedKids = Sort-ArrayByNaturalName $xml (@($kids))
+    } else {
+      $dirs = @(); $files = @()
+      foreach ($k in $kids) { if (Is-DirectoryNode $k) { $dirs += $k } else { $files += $k } }
+      if ($dirs.Count -gt 0) { $dirs = Sort-ArrayByNaturalName $xml (@($dirs)) }
+      if ($files.Count -gt 0) { $files = Sort-ArrayByNaturalName $xml (@($files)) }
+      $expectedKids = @($dirs + $files)
     }
 
     $expected = $expectedKids | ForEach-Object {
       $t = if (Is-DirectoryNode $_) { "D" } else { "F" }
-      "$t:" + (Get-Name $xml $_)
+      "${t}:" + (Get-Name $xml $_)
     }
 
-    if (-not ($actual -join "`n").Equals($expected -join "`n")) {
+    if (-not (($actual -join "`n").Equals($expected -join "`n"))) {
       $ok = $false
       $messages.Value += "NOT_SORTED at $path"
       $messages.Value += "  ACTUAL  : " + ($actual -join " | ")
@@ -278,7 +319,7 @@ function Walk-Check([xml]$xml, $node, [string]$path, [ref]$messages) {
     if ($child.Name -eq "directory" -and -not (Should-SkipNode $xml $child)) {
       $childName = Get-Name $xml $child
       $childPath = if ($path -eq "/root") { "/root/$childName" } else { "$path/$childName" }
-      $childOk = Walk-Check $xml $child $childPath ([ref]$messages.Value)
+      $childOk = Walk-Check $xml $child $childPath $sortScope $messages
       if (-not $childOk) { $ok = $false }
     }
   }
@@ -286,58 +327,41 @@ function Walk-Check([xml]$xml, $node, [string]$path, [ref]$messages) {
   return $ok
 }
 
-function Load-Xml([string]$file) {
-  $xml = New-Object xml
-  $xml.PreserveWhitespace = $true
-  $xml.Load($file)
-  return $xml
-}
-
-function Save-Xml([xml]$xml, [string]$file) {
-  $xml.Save($file)
-}
-
-function Confirm-Apply([string]$device, [string]$file) {
-  $q = "Apply sorted FAT order to device '$device' using tree file '$file'?"
-  $ans = Read-Host "$q (Y/N)"
-  return ($ans -match '^(y|yes)$')
-}
-
 try {
   Test-Executable $YafsPath
 
+  # Mode: SortOnlyFromTree (apply a given tree file)
   if ($Mode -eq "SortOnlyFromTree") {
     $inFile = if ($TreeIn) { $TreeIn } else { $SortedTreeOut }
     if (-not (Test-Path -LiteralPath $inFile)) { throw "TreeIn not found: $inFile" }
+
     if (-not $Force) {
       if (-not (Confirm-Apply $Device $inFile)) {
         Write-Host "CANCELLED"
         exit 3
       }
     }
+
     Invoke-YafsWrite $YafsPath $Device $inFile
     Write-Host "SORTED_APPLIED"
     exit 2
   }
 
-  # For other modes, we dump current tree first
+  # For other modes, dump current tree first
   Invoke-YafsRead $YafsPath $Device $TreeOut
   $xml = Load-Xml $TreeOut
-
-  # Root is <root> with children
   $root = $xml.DocumentElement
   if ($null -eq $root) { throw "Invalid XML: missing root element" }
 
   # CHECK
   $msgs = @()
-  $ok = Walk-Check $xml $root "/root" ([ref]$msgs)
+  $ok = Walk-Check $xml $root "/root" $SortScope ([ref]$msgs)
 
   if ($Mode -eq "CheckOnly") {
     if ($ok) {
       Write-Host "OK"
       exit 0
     } else {
-      # show a limited amount to keep console readable
       $msgs | Select-Object -First 50 | ForEach-Object { Write-Host $_ }
       Write-Host "NG"
       exit 1
@@ -345,7 +369,7 @@ try {
   }
 
   if ($Mode -eq "SortOnlyAuto") {
-    $changed = Walk-Sort $xml $root
+    [void](Walk-Sort $xml $root $SortScope)
     Save-Xml $xml $SortedTreeOut
 
     if (-not $Force) {
@@ -354,6 +378,7 @@ try {
         exit 3
       }
     }
+
     Invoke-YafsWrite $YafsPath $Device $SortedTreeOut
     Write-Host "SORTED_APPLIED"
     exit 2
@@ -366,7 +391,7 @@ try {
     }
 
     # Not sorted -> sort + apply
-    $changed = Walk-Sort $xml $root
+    [void](Walk-Sort $xml $root $SortScope)
     Save-Xml $xml $SortedTreeOut
 
     if (-not $Force) {
@@ -375,13 +400,14 @@ try {
         exit 3
       }
     }
+
     Invoke-YafsWrite $YafsPath $Device $SortedTreeOut
 
     # Verify
     Invoke-YafsRead $YafsPath $Device $TreeOut
     $xml2 = Load-Xml $TreeOut
     $msgs2 = @()
-    $ok2 = Walk-Check $xml2 $xml2.DocumentElement "/root" ([ref]$msgs2)
+    $ok2 = Walk-Check $xml2 $xml2.DocumentElement "/root" $SortScope ([ref]$msgs2)
 
     if ($ok2) {
       Write-Host "SORTED_APPLIED_OK"
