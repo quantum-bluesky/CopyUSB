@@ -1,62 +1,59 @@
 <#
-Mp3FatSort.ps1 - FAT directory order checker/sorter using YAFS (XML tree)
+.SYNOPSIS
+  Check/sort FAT directory order on one or more drives using YAFS.
 
-Features
-- Uses YAFS to read/write FAT directory order via XML tree:
-    yafs -d e: -r -f tree.xml
-    yafs -d e: -w -f tree_sorted.xml
-- Skip:
-    * Directory: "System Volume Information"
-    * File     : "desktop.ini"
-- Sort by "long file name" (long_name), fallback short_name
-- Natural sort (01,02,03,...,10,11,...) with case-insensitive compare
-- Sort scope options:
-    * Both        : sort <directory> + <file> siblings at each level (dir-first)
-    * FoldersOnly : only sort directories; keep file order as-is
-    * FilesOnly   : only sort files; keep folder order as-is
+.DESCRIPTION
+  Uses YAFS to read/write FAT directory order via an XML tree.
+  By default, only media files (audio/video) are checked/sorted; non-media files are ignored.
 
-Modes
-- CheckOnly        : read device, check sorted status (no write)
-- SortOnlyAuto     : read device, generate sorted tree, write to device
-- SortOnlyFromTree : write a provided tree file to device (no read/check unless you do it)
-- CheckAndSort     : read device, check; if NG then sort+write; verify again
+.PARAMETER Device
+  One or more drive letters in YAFS format (e.g. 'f:').
+  You can also pass a comma-separated list: -Device 'f:,g:,h:'
+  Invalid/unavailable drives are skipped.
 
-Exit codes
-  0 = OK (already sorted / check pass)
-  1 = NG (not sorted) [used for CheckOnly]
-  2 = SORTED (changes applied to device)
-  3 = CANCELLED (user chose No at confirm)
-  4 = ERROR (unexpected failure, verify fail, yafs failure, etc.)
+.PARAMETER Mode
+  CheckOnly | SortOnlyAuto | SortOnlyFromTree | CheckAndSort
 
-Examples
-  # Check folders + files
-  .\Mp3FatSort.ps1 -YafsPath "C:\Tools\yafs\yafs.exe" -Device "e:" -Mode CheckOnly
+.PARAMETER SortScope
+  Both (dir-first), FoldersOnly, FilesOnly.
 
-  # Check & auto-fix (no confirm)
-  .\Mp3FatSort.ps1 -YafsPath "C:\Tools\yafs\yafs.exe" -Device "e:" -Mode CheckAndSort -Force
+.PARAMETER FileFilter
+  MediaOnly (default) to only check/sort audio/video files, or AllFiles.
 
-  # Only sort folders, keep file order inside
-  .\Mp3FatSort.ps1 -YafsPath "C:\Tools\yafs\yafs.exe" -Device "e:" -Mode CheckAndSort -SortScope FoldersOnly -Force
+.PARAMETER NoParallel
+  Force sequential processing when multiple drives are provided.
 
-  # Only sort files, keep folder order
-  .\Mp3FatSort.ps1 -YafsPath "C:\Tools\yafs\yafs.exe" -Device "e:" -Mode CheckAndSort -SortScope FilesOnly -Force
+.PARAMETER ThrottleLimit
+  Max concurrent drives when running in parallel.
 
-  # Apply a prepared tree file
-  .\Mp3FatSort.ps1 -YafsPath "C:\Tools\yafs\yafs.exe" -Device "e:" -Mode SortOnlyFromTree -TreeIn ".\tree_sorted.xml" -Force
+.PARAMETER InstallYafs
+  Copies bundled YAFS binaries from '.\yafs\bin' into the folder containing -YafsPath.
+
+.EXAMPLE
+  .\Mp3FatSort.ps1 -Device 'f:' -Mode CheckOnly
+
+.EXAMPLE
+  .\Mp3FatSort.ps1 -Device 'f:,g:,h:' -Mode CheckOnly
+
+.EXAMPLE
+  .\Mp3FatSort.ps1 -InstallYafs -YafsPath 'C:\Tools\yafs\yafs.exe'
+
+.NOTES
+  If YAFS reports 'Error while locking the file "\\.\f:". Access is denied.',
+  close Explorer/apps using the drive and/or run PowerShell as Administrator.
+  Build guide: .\yafs\BuildGuide.md
 #>
 
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName="Run")]
 param(
-  # YAFS exe path
+  [Parameter(ParameterSetName="Run")]
+  [Parameter(ParameterSetName="InstallYafs")]
   [string]$YafsPath="C:\Tools\yafs\yafs.exe",
 
-  # Drive letter like "e:" (exactly as YAFS expects)
-  [Parameter(Mandatory=$true)]
-  [ValidatePattern('^[A-Za-z]:$')]
-  [string]$Device,
+  [Parameter(Mandatory=$true, ParameterSetName="Run")]
+  [string[]]$Device,
 
-  # Mode
-  [Parameter(Mandatory=$true)]
+  [Parameter(Mandatory=$true, ParameterSetName="Run")]
   [ValidateSet("CheckOnly","SortOnlyAuto","SortOnlyFromTree","CheckAndSort")]
   [string]$Mode,
 
@@ -64,28 +61,53 @@ param(
   # - Both        : sort directory + file at every level (default)
   # - FoldersOnly : only sort <directory> siblings; keep <file> order as-is
   # - FilesOnly   : only sort <file> siblings; keep <directory> order as-is
+  [Parameter(ParameterSetName="Run")]
   [ValidateSet("Both","FoldersOnly","FilesOnly")]
   [string]$SortScope = "Both",
 
   # File filtering
   # Default: only sort/check media files (audio/video). Non-media files are ignored.
+  [Parameter(ParameterSetName="Run")]
   [ValidateSet("MediaOnly","AllFiles")]
   [string]$FileFilter = "MediaOnly",
 
   # Where to dump current tree (from yafs -r). Default: .\tree.xml
+  [Parameter(ParameterSetName="Run")]
   [string]$TreeOut = (Join-Path (Get-Location) "tree.xml"),
 
   # Where to write sorted tree xml. Default: .\tree_sorted.xml
+  [Parameter(ParameterSetName="Run")]
   [string]$SortedTreeOut = (Join-Path (Get-Location) "tree_sorted.xml"),
 
   # Tree file to apply (for SortOnlyFromTree). If omitted, use -SortedTreeOut
+  [Parameter(ParameterSetName="Run")]
   [string]$TreeIn,
 
   # Confirm before writing to device (unless -Force)
+  [Parameter(ParameterSetName="Run")]
   [switch]$Force,
 
   # Verbose-ish logging
-  [switch]$VerboseLog
+  [Parameter(ParameterSetName="Run")]
+  [Parameter(ParameterSetName="InstallYafs")]
+  [switch]$VerboseLog,
+
+  [Parameter(ParameterSetName="Run")]
+  [switch]$NoParallel,
+
+  [Parameter(ParameterSetName="Run")]
+  [ValidateRange(1,64)]
+  [int]$ThrottleLimit = 4,
+
+  [Parameter(Mandatory=$true, ParameterSetName="Help")]
+  [Alias("h","?")]
+  [switch]$Help,
+
+  [Parameter(Mandatory=$true, ParameterSetName="InstallYafs")]
+  [switch]$InstallYafs,
+
+  [Parameter(ParameterSetName="InstallYafs")]
+  [string]$YafsSourceDir = (Join-Path $PSScriptRoot "yafs\bin")
 )
 
 Set-StrictMode -Version Latest
@@ -93,6 +115,220 @@ $ErrorActionPreference = "Stop"
 
 function Write-Log([string]$msg) {
   if ($VerboseLog) { Write-Host $msg }
+}
+
+function Show-ScriptHelp {
+  Get-Help -Name $PSCommandPath -Detailed | Out-Host
+  Write-Host ""
+  Write-Host "YAFS build guide: $(Join-Path $PSScriptRoot 'yafs\BuildGuide.md')"
+}
+
+function Normalize-DeviceToken([string]$token) {
+  if ($null -eq $token) { return $null }
+  $t = $token.Trim()
+  if ($t.Length -eq 0) { return $null }
+
+  $t = $t.Trim("'").Trim('"')
+  $t = $t.TrimEnd('\','/')
+
+  if ($t -match '^[A-Za-z]$') { return ($t.ToLowerInvariant() + ":") }
+  if ($t -match '^[A-Za-z]:$') { return ($t.Substring(0,1).ToLowerInvariant() + ":") }
+  if ($t -match '^[A-Za-z]:') { return ($t.Substring(0,1).ToLowerInvariant() + ":") }
+
+  return $null
+}
+
+function Parse-DeviceList([string[]]$deviceArgs) {
+  $raw = ($deviceArgs | Where-Object { $null -ne $_ }) -join ","
+  $tokens = $raw -split '[,;\s]+'
+
+  $out = New-Object System.Collections.Generic.List[string]
+  $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+  foreach ($tok in $tokens) {
+    $d = Normalize-DeviceToken $tok
+    if ($null -eq $d) { continue }
+    if ($seen.Add($d)) { [void]$out.Add($d) }
+  }
+  return ,$out.ToArray()
+}
+
+function Test-DeviceReady([string]$device) {
+  if ($null -eq $device -or $device -notmatch '^[A-Za-z]:$') { return $false }
+  $root = "$device\\"
+  try {
+    return (Test-Path -LiteralPath $root)
+  } catch {
+    return $false
+  }
+}
+
+function Get-DeviceSpecificPath([string]$basePath, [string]$device) {
+  $dir = Split-Path -Parent $basePath
+  if ($null -eq $dir -or $dir.Trim().Length -eq 0) { $dir = (Get-Location).Path }
+
+  $name = [IO.Path]::GetFileNameWithoutExtension($basePath)
+  $ext = [IO.Path]::GetExtension($basePath)
+  if ($null -eq $ext -or $ext.Length -eq 0) { $ext = ".xml" }
+
+  $d = $device.TrimEnd(':')
+  return (Join-Path $dir ("{0}_{1}{2}" -f $name, $d, $ext))
+}
+
+function Get-SelfPowerShellExe {
+  try {
+    $p = Get-Process -Id $PID -ErrorAction Stop
+    if ($p.Path -and (Test-Path -LiteralPath $p.Path)) { return $p.Path }
+  } catch {
+    # fall through
+  }
+
+  if ($PSVersionTable.PSEdition -eq "Core") { return (Join-Path $PSHOME "pwsh.exe") }
+  return (Join-Path $PSHOME "powershell.exe")
+}
+
+function Get-OverallExitCode([int[]]$codes) {
+  if ($codes -contains 4) { return 4 }
+  if ($codes -contains 3) { return 3 }
+  if ($codes -contains 1) { return 1 }
+  if ($codes -contains 2) { return 2 }
+  return 0
+}
+
+function Install-YafsBinaries([string]$targetYafsPath, [string]$sourceDir) {
+  $srcExe = Join-Path $sourceDir "yafs.exe"
+  if (-not (Test-Path -LiteralPath $srcExe)) {
+    throw "YAFS binary not found at: $srcExe (build it first, see: $(Join-Path $PSScriptRoot 'yafs\BuildGuide.md'))"
+  }
+
+  $targetDir = Split-Path -Parent $targetYafsPath
+  if ($null -eq $targetDir -or $targetDir.Trim().Length -eq 0) { throw "Invalid YafsPath: $targetYafsPath" }
+  New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+
+  Copy-Item -Force -LiteralPath $srcExe -Destination $targetYafsPath
+
+  $srcDll = Join-Path $sourceDir "xerces-c_3_3D.dll"
+  if (Test-Path -LiteralPath $srcDll) {
+    Copy-Item -Force -LiteralPath $srcDll -Destination (Join-Path $targetDir "xerces-c_3_3D.dll")
+  }
+
+  Write-Host "YAFS_INSTALLED: $targetYafsPath"
+}
+
+function Invoke-MultiDeviceRun(
+  [string[]]$devices,
+  [string]$pwshExe,
+  [string]$scriptPath,
+  [string]$yafsPath,
+  [string]$mode,
+  [string]$sortScope,
+  [string]$fileFilter,
+  [string]$treeOutBase,
+  [string]$sortedTreeOutBase,
+  [string]$treeIn,
+  [switch]$force,
+  [switch]$verboseLog,
+  [switch]$noParallel,
+  [int]$throttleLimit
+) {
+  $needsPrompt = (-not $force) -and ($mode -ne "CheckOnly")
+  $runParallel = (-not $noParallel) -and ($devices.Count -gt 1) -and (-not $needsPrompt)
+
+  if ($mode -eq "SortOnlyFromTree" -and (-not $treeIn) -and (-not (Test-Path -LiteralPath $sortedTreeOutBase))) {
+    throw "SortOnlyFromTree needs -TreeIn (or an existing -SortedTreeOut file)."
+  }
+
+  if ($needsPrompt -and $devices.Count -gt 1 -and -not $noParallel) {
+    Write-Host "NOTE: multiple devices + confirmation prompt -> running sequential. Add -Force to enable parallel."
+  }
+
+  $results = @()
+
+  if ($runParallel) {
+    $jobs = @()
+    foreach ($d in $devices) {
+      $treeOut = Get-DeviceSpecificPath $treeOutBase $d
+      $sortedOut = if ($mode -eq "SortOnlyFromTree") { $sortedTreeOutBase } else { Get-DeviceSpecificPath $sortedTreeOutBase $d }
+
+      $argsList = @("-NoProfile","-ExecutionPolicy","Bypass","-File",$scriptPath,
+        "-YafsPath",$yafsPath,
+        "-Device",$d,
+        "-Mode",$mode,
+        "-SortScope",$sortScope,
+        "-FileFilter",$fileFilter,
+        "-TreeOut",$treeOut,
+        "-SortedTreeOut",$sortedOut
+      )
+      if ($treeIn) { $argsList += @("-TreeIn",$treeIn) }
+      if ($force) { $argsList += "-Force" }
+      if ($verboseLog) { $argsList += "-VerboseLog" }
+
+      $outDir = Split-Path -Parent $treeOut
+      if ($outDir) { New-Item -ItemType Directory -Force -Path $outDir | Out-Null }
+
+      $jobs += Start-Job -ArgumentList @($pwshExe,$argsList,$d) -ScriptBlock {
+        param($exe,$a,$dev)
+        $o = & $exe @a 2>&1
+        $c = $LASTEXITCODE
+        $t = ""
+        if ($null -ne $o) { $t = ($o | Out-String).TrimEnd() }
+        [pscustomobject]@{ Device = $dev; ExitCode = $c; Output = $t }
+      }
+
+      while ($jobs.Count -ge $throttleLimit) {
+        $done = Wait-Job -Job $jobs -Any
+        $results += Receive-Job -Job $done
+        Remove-Job -Job $done
+        $jobs = @($jobs | Where-Object { $_.Id -ne $done.Id })
+      }
+    }
+
+    if ($jobs.Count -gt 0) {
+      Wait-Job -Job $jobs | Out-Null
+      $results += Receive-Job -Job $jobs
+      Remove-Job -Job $jobs
+    }
+  }
+  else {
+    foreach ($d in $devices) {
+      $treeOut = Get-DeviceSpecificPath $treeOutBase $d
+      $sortedOut = if ($mode -eq "SortOnlyFromTree") { $sortedTreeOutBase } else { Get-DeviceSpecificPath $sortedTreeOutBase $d }
+
+      $argsList = @("-NoProfile","-ExecutionPolicy","Bypass","-File",$scriptPath,
+        "-YafsPath",$yafsPath,
+        "-Device",$d,
+        "-Mode",$mode,
+        "-SortScope",$sortScope,
+        "-FileFilter",$fileFilter,
+        "-TreeOut",$treeOut,
+        "-SortedTreeOut",$sortedOut
+      )
+      if ($treeIn) { $argsList += @("-TreeIn",$treeIn) }
+      if ($force) { $argsList += "-Force" }
+      if ($verboseLog) { $argsList += "-VerboseLog" }
+
+      $outDir = Split-Path -Parent $treeOut
+      if ($outDir) { New-Item -ItemType Directory -Force -Path $outDir | Out-Null }
+
+      $o = & $pwshExe @argsList 2>&1
+      $c = $LASTEXITCODE
+      $t = ""
+      if ($null -ne $o) { $t = ($o | Out-String).TrimEnd() }
+      $results += [pscustomobject]@{ Device = $d; ExitCode = $c; Output = $t }
+    }
+  }
+
+  foreach ($r in $results) {
+    if ($r.Output) {
+      foreach ($line in ($r.Output -split "`r?`n")) {
+        if ($line -ne "") { Write-Host ("[{0}] {1}" -f $r.Device, $line) }
+      }
+    } else {
+      Write-Host ("[{0}] (no output)" -f $r.Device)
+    }
+  }
+
+  $codes = @($results | ForEach-Object { [int]$_.ExitCode })
+  return (Get-OverallExitCode $codes)
 }
 
 function Test-IsAdministrator {
@@ -115,13 +351,13 @@ function Invoke-Yafs([string]$yafs, [string[]]$yafsArgs) {
 
 function Test-Executable([string]$path) {
   if (-not (Test-Path -LiteralPath $path)) {
-    throw "YAFS not found: $path"
+    throw "YAFS not found: $path (tip: run .\\Mp3FatSort.ps1 -InstallYafs -YafsPath `"$path`")"
   }
 }
 
 function Invoke-YafsRead([string]$yafs, [string]$device, [string]$outFile) {
   Write-Log "Running: $yafs -d $device -r -f `"$outFile`""
-  $maxRetry = 3
+  $maxRetry = 1
   $delayMs = 500
   for ($attempt = 1; $attempt -le ($maxRetry + 1); $attempt++) {
     $r = Invoke-Yafs $yafs @("-d",$device,"-r","-f",$outFile)
@@ -145,7 +381,7 @@ function Invoke-YafsRead([string]$yafs, [string]$device, [string]$outFile) {
 
 function Invoke-YafsWrite([string]$yafs, [string]$device, [string]$inFile) {
   Write-Log "Running: $yafs -d $device -w -f `"$inFile`""
-  $maxRetry = 3
+  $maxRetry = 1
   $delayMs = 500
   for ($attempt = 1; $attempt -le ($maxRetry + 1); $attempt++) {
     $r = Invoke-Yafs $yafs @("-d",$device,"-w","-f",$inFile)
@@ -450,6 +686,49 @@ function Walk-Check([xml]$xml, $node, [string]$path, [string]$sortScope, [string
   return $ok
 }
 
+if ($PSCmdlet.ParameterSetName -eq "Help") {
+  Show-ScriptHelp
+  exit 0
+}
+
+if ($PSCmdlet.ParameterSetName -eq "InstallYafs") {
+  try {
+    Install-YafsBinaries $YafsPath $YafsSourceDir
+    exit 0
+  } catch {
+    Write-Host ("ERROR: " + $_.Exception.Message)
+    exit 4
+  }
+}
+
+$devicesParsed = Parse-DeviceList $Device
+if ($devicesParsed.Count -eq 0) {
+  Write-Host "ERROR: no valid drive letter parsed from -Device (example: -Device 'f:' or -Device 'f:,g:')"
+  exit 4
+}
+
+$validDevices = @()
+$skippedDevices = @()
+foreach ($d in $devicesParsed) {
+  if (Test-DeviceReady $d) { $validDevices += $d } else { $skippedDevices += $d }
+}
+foreach ($d in $skippedDevices) {
+  Write-Host ("SKIP: {0} (not found / not ready)" -f $d)
+}
+if ($validDevices.Count -eq 0) {
+  Write-Host "ERROR: no valid/ready drives to process"
+  exit 4
+}
+
+if ($validDevices.Count -gt 1) {
+  $pwshExe = Get-SelfPowerShellExe
+  $scriptPath = $PSCommandPath
+  $exitCode = Invoke-MultiDeviceRun -devices $validDevices -pwshExe $pwshExe -scriptPath $scriptPath -yafsPath $YafsPath -mode $Mode -sortScope $SortScope -fileFilter $FileFilter -treeOutBase $TreeOut -sortedTreeOutBase $SortedTreeOut -treeIn $TreeIn -force:$Force -verboseLog:$VerboseLog -noParallel:$NoParallel -throttleLimit $ThrottleLimit
+  exit $exitCode
+}
+
+$deviceSingle = $validDevices[0]
+
 try {
   Test-Executable $YafsPath
 
@@ -459,19 +738,19 @@ try {
     if (-not (Test-Path -LiteralPath $inFile)) { throw "TreeIn not found: $inFile" }
 
     if (-not $Force) {
-      if (-not (Confirm-Apply $Device $inFile)) {
+      if (-not (Confirm-Apply $deviceSingle $inFile)) {
         Write-Host "CANCELLED"
         exit 3
       }
     }
 
-    Invoke-YafsWrite $YafsPath $Device $inFile
+    Invoke-YafsWrite $YafsPath $deviceSingle $inFile
     Write-Host "SORTED_APPLIED"
     exit 2
   }
 
   # For other modes, dump current tree first
-  Invoke-YafsRead $YafsPath $Device $TreeOut
+  Invoke-YafsRead $YafsPath $deviceSingle $TreeOut
   $xml = Load-Xml $TreeOut
   $root = $xml.DocumentElement
   if ($null -eq $root) { throw "Invalid XML: missing root element" }
@@ -496,13 +775,13 @@ try {
     Save-Xml $xml $SortedTreeOut
 
     if (-not $Force) {
-      if (-not (Confirm-Apply $Device $SortedTreeOut)) {
+      if (-not (Confirm-Apply $deviceSingle $SortedTreeOut)) {
         Write-Host "CANCELLED"
         exit 3
       }
     }
 
-    Invoke-YafsWrite $YafsPath $Device $SortedTreeOut
+    Invoke-YafsWrite $YafsPath $deviceSingle $SortedTreeOut
     Write-Host "SORTED_APPLIED"
     exit 2
   }
@@ -518,16 +797,16 @@ try {
     Save-Xml $xml $SortedTreeOut
 
     if (-not $Force) {
-      if (-not (Confirm-Apply $Device $SortedTreeOut)) {
+      if (-not (Confirm-Apply $deviceSingle $SortedTreeOut)) {
         Write-Host "CANCELLED"
         exit 3
       }
     }
 
-    Invoke-YafsWrite $YafsPath $Device $SortedTreeOut
+    Invoke-YafsWrite $YafsPath $deviceSingle $SortedTreeOut
 
     # Verify
-    Invoke-YafsRead $YafsPath $Device $TreeOut
+    Invoke-YafsRead $YafsPath $deviceSingle $TreeOut
     $xml2 = Load-Xml $TreeOut
     $msgs2 = @()
     $ok2 = Walk-Check $xml2 $xml2.DocumentElement "/root" $SortScope $FileFilter ([ref]$msgs2)
