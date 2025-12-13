@@ -95,6 +95,24 @@ function Write-Log([string]$msg) {
   if ($VerboseLog) { Write-Host $msg }
 }
 
+function Test-IsAdministrator {
+  try {
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $p = [Security.Principal.WindowsPrincipal]::new($id)
+    return $p.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
+  } catch {
+    return $false
+  }
+}
+
+function Invoke-Yafs([string]$yafs, [string[]]$yafsArgs) {
+  $output = & $yafs @yafsArgs 2>&1
+  $code = $LASTEXITCODE
+  $text = ""
+  if ($null -ne $output) { $text = ($output | Out-String).TrimEnd() }
+  return [pscustomobject]@{ ExitCode = $code; Output = $text }
+}
+
 function Test-Executable([string]$path) {
   if (-not (Test-Path -LiteralPath $path)) {
     throw "YAFS not found: $path"
@@ -103,14 +121,50 @@ function Test-Executable([string]$path) {
 
 function Invoke-YafsRead([string]$yafs, [string]$device, [string]$outFile) {
   Write-Log "Running: $yafs -d $device -r -f `"$outFile`""
-  & $yafs -d $device -r -f $outFile | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw "yafs -r failed with code $LASTEXITCODE" }
+  $maxRetry = 3
+  $delayMs = 500
+  for ($attempt = 1; $attempt -le ($maxRetry + 1); $attempt++) {
+    $r = Invoke-Yafs $yafs @("-d",$device,"-r","-f",$outFile)
+    if ($r.ExitCode -eq 0) { return }
+
+    $isLockDenied = ($r.Output -match 'locking the file' -and $r.Output -match 'Access is denied')
+    if ($isLockDenied -and $attempt -le $maxRetry) {
+      Start-Sleep -Milliseconds $delayMs
+      continue
+    }
+
+    if ($isLockDenied) {
+      $elev = if (Test-IsAdministrator) { "elevated" } else { "NOT elevated" }
+      throw ("yafs -r failed (cannot lock \\.\{0}) [session: {1}]. Close Explorer/windows/apps using {0}, then retry; if still fails, run PowerShell as Administrator.`n{2}" -f $device, $elev, $r.Output)
+    }
+
+    if ($r.Output) { throw ("yafs -r failed with code {0}`n{1}" -f $r.ExitCode, $r.Output) }
+    throw ("yafs -r failed with code {0}" -f $r.ExitCode)
+  }
 }
 
 function Invoke-YafsWrite([string]$yafs, [string]$device, [string]$inFile) {
   Write-Log "Running: $yafs -d $device -w -f `"$inFile`""
-  & $yafs -d $device -w -f $inFile | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw "yafs -w failed with code $LASTEXITCODE" }
+  $maxRetry = 3
+  $delayMs = 500
+  for ($attempt = 1; $attempt -le ($maxRetry + 1); $attempt++) {
+    $r = Invoke-Yafs $yafs @("-d",$device,"-w","-f",$inFile)
+    if ($r.ExitCode -eq 0) { return }
+
+    $isLockDenied = ($r.Output -match 'locking the file' -and $r.Output -match 'Access is denied')
+    if ($isLockDenied -and $attempt -le $maxRetry) {
+      Start-Sleep -Milliseconds $delayMs
+      continue
+    }
+
+    if ($isLockDenied) {
+      $elev = if (Test-IsAdministrator) { "elevated" } else { "NOT elevated" }
+      throw ("yafs -w failed (cannot lock \\.\{0}) [session: {1}]. Close Explorer/windows/apps using {0}, then retry; if still fails, run PowerShell as Administrator.`n{2}" -f $device, $elev, $r.Output)
+    }
+
+    if ($r.Output) { throw ("yafs -w failed with code {0}`n{1}" -f $r.ExitCode, $r.Output) }
+    throw ("yafs -w failed with code {0}" -f $r.ExitCode)
+  }
 }
 
 function Load-Xml([string]$file) {
