@@ -67,6 +67,11 @@ param(
   [ValidateSet("Both","FoldersOnly","FilesOnly")]
   [string]$SortScope = "Both",
 
+  # File filtering
+  # Default: only sort/check media files (audio/video). Non-media files are ignored.
+  [ValidateSet("MediaOnly","AllFiles")]
+  [string]$FileFilter = "MediaOnly",
+
   # Where to dump current tree (from yafs -r). Default: .\tree.xml
   [string]$TreeOut = (Join-Path (Get-Location) "tree.xml"),
 
@@ -139,6 +144,58 @@ function Get-Name([xml]$xml, $node) {
 function Is-DirectoryNode($node) { return $node.Name -eq "directory" }
 function Is-FileNode($node) { return $node.Name -eq "file" }
 
+function Is-MediaFileName([string]$name) {
+  if ($null -eq $name) { return $false }
+  $ext = [IO.Path]::GetExtension($name)
+  if ($null -eq $ext -or $ext.Length -le 1) { return $false }
+  $e = $ext.Substring(1).ToLowerInvariant()
+  switch ($e) {
+    # audio
+    "mp3" { return $true }
+    "m4a" { return $true }
+    "aac" { return $true }
+    "wav" { return $true }
+    "flac" { return $true }
+    "ogg" { return $true }
+    "opus" { return $true }
+    "wma" { return $true }
+    # video
+    "mp4" { return $true }
+    "mkv" { return $true }
+    "avi" { return $true }
+    "mov" { return $true }
+    "m4v" { return $true }
+    "3gp" { return $true }
+    "webm" { return $true }
+    default { return $false }
+  }
+}
+
+function Is-MediaFileNode([xml]$xml, $node) {
+  if (-not (Is-FileNode $node)) { return $false }
+  $n = Get-Name $xml $node
+  return (Is-MediaFileName $n)
+}
+
+function Should-ConsiderNodeForSort([xml]$xml, $node, [string]$sortScope, [string]$fileFilter) {
+  if ($node.NodeType -ne [System.Xml.XmlNodeType]::Element) { return $false }
+  if (-not (Is-DirectoryNode $node) -and -not (Is-FileNode $node)) { return $false }
+  if (Should-SkipNode $xml $node) { return $false }
+
+  if ($sortScope -eq "FoldersOnly") { return (Is-DirectoryNode $node) }
+  if ($sortScope -eq "FilesOnly") {
+    if (-not (Is-FileNode $node)) { return $false }
+    if ($fileFilter -eq "AllFiles") { return $true }
+    return (Is-MediaFileNode $xml $node)
+  }
+
+  # Both
+  if (Is-DirectoryNode $node) { return $true }
+  if (-not (Is-FileNode $node)) { return $false }
+  if ($fileFilter -eq "AllFiles") { return $true }
+  return (Is-MediaFileNode $xml $node)
+}
+
 function Should-SkipNode([xml]$xml, $node) {
   if (Is-DirectoryNode $node) {
     $n = Get-Name $xml $node
@@ -202,13 +259,13 @@ function Sort-ArrayByNaturalName([xml]$xml, [object[]]$arr) {
   return ,$arr
 }
 
-function Sort-Siblings([xml]$xml, $parentNode, [string]$sortScope) {
-  # Collect children of interest (dir/file) excluding skips and respecting scope
+function Sort-Siblings([xml]$xml, $parentNode, [string]$sortScope, [string]$fileFilter) {
+  # Consider only eligible nodes, but keep all other nodes in place.
+  $allNodes = @($parentNode.ChildNodes)
+
   $kids = @()
-  foreach ($child in @($parentNode.ChildNodes)) {
-    if (($child.Name -eq "directory" -or $child.Name -eq "file") -and -not (Should-SkipNode $xml $child)) {
-      if ($sortScope -eq "FoldersOnly" -and $child.Name -ne "directory") { continue }
-      if ($sortScope -eq "FilesOnly"   -and $child.Name -ne "file")      { continue }
+  foreach ($child in $allNodes) {
+    if (Should-ConsiderNodeForSort $xml $child $sortScope $fileFilter) {
       $kids += $child
     }
   }
@@ -239,17 +296,31 @@ function Sort-Siblings([xml]$xml, $parentNode, [string]$sortScope) {
     if (-not [object]::ReferenceEquals($current[$i], $desired[$i])) { $changed = $true; break }
   }
 
-  # Reorder in XML by removing + appending only the filtered kids
+  # Reorder in XML while keeping non-eligible nodes (non-media, etc.) in place
   if ($changed) {
-    foreach ($n in $current) { [void]$parentNode.RemoveChild($n) }
-    foreach ($n in $desired) { [void]$parentNode.AppendChild($n) }
+    $desiredIndex = 0
+    $newNodes = @()
+    foreach ($n in $allNodes) {
+      if (Should-ConsiderNodeForSort $xml $n $sortScope $fileFilter) {
+        $newNodes += $desired[$desiredIndex]
+        $desiredIndex++
+      } else {
+        $newNodes += $n
+      }
+    }
+
+    foreach ($n in $allNodes) { [void]$parentNode.RemoveChild($n) }
+    foreach ($n in $newNodes) { [void]$parentNode.AppendChild($n) }
   }
 
-  # Reassign order attributes for the nodes we touched
-  for ($i=0; $i -lt $desired.Count; $i++) {
+  # Reassign order attributes for all file/directory siblings (match final XML order)
+  $siblings = @($parentNode.ChildNodes | Where-Object {
+    $_.NodeType -eq [System.Xml.XmlNodeType]::Element -and ($_.Name -eq "directory" -or $_.Name -eq "file")
+  })
+  for ($i=0; $i -lt $siblings.Count; $i++) {
     $newOrder = [string](($i+1) * 100)
-    if ($desired[$i].GetAttribute("order") -ne $newOrder) {
-      $desired[$i].SetAttribute("order", $newOrder)
+    if ($siblings[$i].GetAttribute("order") -ne $newOrder) {
+      $siblings[$i].SetAttribute("order", $newOrder)
       $changed = $true
     }
   }
@@ -257,27 +328,25 @@ function Sort-Siblings([xml]$xml, $parentNode, [string]$sortScope) {
   return $changed
 }
 
-function Walk-Sort([xml]$xml, $node, [string]$sortScope) {
+function Walk-Sort([xml]$xml, $node, [string]$sortScope, [string]$fileFilter) {
   $any = $false
-  if (Sort-Siblings $xml $node $sortScope) { $any = $true }
+  if (Sort-Siblings $xml $node $sortScope $fileFilter) { $any = $true }
 
   foreach ($child in @($node.ChildNodes)) {
     if ($child.Name -eq "directory" -and -not (Should-SkipNode $xml $child)) {
-      if (Walk-Sort $xml $child $sortScope) { $any = $true }
+      if (Walk-Sort $xml $child $sortScope $fileFilter) { $any = $true }
     }
   }
   return $any
 }
 
-function Walk-Check([xml]$xml, $node, [string]$path, [string]$sortScope, [ref]$messages) {
+function Walk-Check([xml]$xml, $node, [string]$path, [string]$sortScope, [string]$fileFilter, [ref]$messages) {
   $ok = $true
 
-  # Children we consider (respect scope)
+  # Children we consider (respect scope + file filter)
   $kids = @()
   foreach ($child in @($node.ChildNodes)) {
-    if (($child.Name -eq "directory" -or $child.Name -eq "file") -and -not (Should-SkipNode $xml $child)) {
-      if ($sortScope -eq "FoldersOnly" -and $child.Name -ne "directory") { continue }
-      if ($sortScope -eq "FilesOnly"   -and $child.Name -ne "file")      { continue }
+    if (Should-ConsiderNodeForSort $xml $child $sortScope $fileFilter) {
       $kids += $child
     }
   }
@@ -319,7 +388,7 @@ function Walk-Check([xml]$xml, $node, [string]$path, [string]$sortScope, [ref]$m
     if ($child.Name -eq "directory" -and -not (Should-SkipNode $xml $child)) {
       $childName = Get-Name $xml $child
       $childPath = if ($path -eq "/root") { "/root/$childName" } else { "$path/$childName" }
-      $childOk = Walk-Check $xml $child $childPath $sortScope $messages
+      $childOk = Walk-Check $xml $child $childPath $sortScope $fileFilter $messages
       if (-not $childOk) { $ok = $false }
     }
   }
@@ -355,7 +424,7 @@ try {
 
   # CHECK
   $msgs = @()
-  $ok = Walk-Check $xml $root "/root" $SortScope ([ref]$msgs)
+  $ok = Walk-Check $xml $root "/root" $SortScope $FileFilter ([ref]$msgs)
 
   if ($Mode -eq "CheckOnly") {
     if ($ok) {
@@ -369,7 +438,7 @@ try {
   }
 
   if ($Mode -eq "SortOnlyAuto") {
-    [void](Walk-Sort $xml $root $SortScope)
+    [void](Walk-Sort $xml $root $SortScope $FileFilter)
     Save-Xml $xml $SortedTreeOut
 
     if (-not $Force) {
@@ -391,7 +460,7 @@ try {
     }
 
     # Not sorted -> sort + apply
-    [void](Walk-Sort $xml $root $SortScope)
+    [void](Walk-Sort $xml $root $SortScope $FileFilter)
     Save-Xml $xml $SortedTreeOut
 
     if (-not $Force) {
@@ -407,7 +476,7 @@ try {
     Invoke-YafsRead $YafsPath $Device $TreeOut
     $xml2 = Load-Xml $TreeOut
     $msgs2 = @()
-    $ok2 = Walk-Check $xml2 $xml2.DocumentElement "/root" $SortScope ([ref]$msgs2)
+    $ok2 = Walk-Check $xml2 $xml2.DocumentElement "/root" $SortScope $FileFilter ([ref]$msgs2)
 
     if ($ok2) {
       Write-Host "SORTED_APPLIED_OK"
