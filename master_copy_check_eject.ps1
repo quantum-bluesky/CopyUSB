@@ -632,63 +632,66 @@ foreach ($drv in $PreparedTargets) {
     Start-Sleep -Milliseconds 300
 }
 
-# Giám sát tiến trình copy theo ổ
+# Giam sat tien trinh copy theo o
 while ($active.Count -gt 0) {
     $procs = $active | Select-Object -ExpandProperty Process
-    $finished = Wait-Process -InputObject $procs -Any
-    $done = $active | Where-Object { $_.Process.Id -eq $finished.Id }
-    if (-not $done) { continue }
+    [void](Wait-Process -InputObject $procs -Any -Timeout 5)
 
-    $drv = $done.Drive
-    $code = $done.Process.ExitCode
-    $copyResults[$drv] = $code
-    $active = $active | Where-Object { $_.Process.Id -ne $finished.Id }
+    $doneSet = $active | Where-Object { $_.Process.HasExited }
+    if (-not $doneSet) { continue }
 
-    if ($code -lt 8) {
-        Write-Log ("COPY tới {0} HOÀN TẤT. ExitCode={1}" -f $drv, $code)
-        continue
-    }
+    foreach ($done in @($doneSet)) {
+        $drv = $done.Drive
+        $code = $done.Process.ExitCode
+        $copyResults[$drv] = $code
+        $active = $active | Where-Object { $_.Process.Id -ne $done.Process.Id }
 
-    Write-Log ("COPY tới {0} THẤT BẠI. ExitCode={1}" -f $drv, $code) "ERROR"
-    if ($AutoYes) {
-        Write-Log "AutoYes đang bật -> không thử lại copy cho ổ này." "ERROR"
-        continue
-    }
+        if ($code -lt 8) {
+            Write-Log ("COPY toi {0} HOAN TAT. ExitCode={1}" -f $drv, $code)
+            continue
+        }
 
-    $stillThere = Test-Path ($drv + "\")
-    if (-not $stillThere) {
-        Write-Log ("Ổ {0} không còn sẵn sàng (có thể bị rút). Thử remount..." -f $drv) "ERROR"
-        $remounted = Try-RemountDrive -DriveLetter $drv -WaitSec 30
-        if ($remounted) {
-            Write-Log ("Remount ổ {0} thành công, thử copy lại..." -f $drv) "WARN"
+        Write-Log ("COPY toi {0} THAT BAI. ExitCode={1}" -f $drv, $code) "ERROR"
+        if ($AutoYes) {
+            Write-Log "AutoYes dang bat -> khong thu lai copy cho o nay." "ERROR"
+            continue
+        }
+
+        $stillThere = Test-Path ($drv + "\\")
+        if (-not $stillThere) {
+            Write-Log ("O {0} khong con san sang (co the bi rut). Thu remount..." -f $drv) "ERROR"
+            $remounted = Try-RemountDrive -DriveLetter $drv -WaitSec 30
+            if ($remounted) {
+                Write-Log ("Remount o {0} thanh cong, thu copy lai..." -f $drv) "WARN"
+                $retryProc = Start-CopyProcess -DriveLetter $drv -UseMirror ($MirrorTargets -contains $drv) -ThreadNo $threadNo
+                if ($retryProc) {
+                    $copyResults.Remove($drv) | Out-Null
+                    $active += $retryProc
+                    continue
+                } else {
+                    Write-Log ("Khoi dong copy lai o {0} sau remount that bai." -f $drv) "ERROR"
+                }
+            }
+        }
+
+        $ans = Read-Host ("O {0} gap loi (ExitCode={1}). Cam lai/Remount neu da rut, nhap Y de thu copy lai, phim khac = bo qua o nay" -f $drv, $code)
+        if ($ans -and $ans.ToUpper() -eq 'Y') {
+            if (-not (Wait-DriveReady $drv 60)) {
+                Write-Log ("O {0} van khong san sang sau 60s. Bo qua o nay." -f $drv) "ERROR"
+                continue
+            }
+            Write-Log ("Thu copy lai o {0}..." -f $drv)
             $retryProc = Start-CopyProcess -DriveLetter $drv -UseMirror ($MirrorTargets -contains $drv) -ThreadNo $threadNo
             if ($retryProc) {
                 $copyResults.Remove($drv) | Out-Null
                 $active += $retryProc
-                continue
             } else {
-                Write-Log ("Khởi động copy lại ổ {0} sau remount thất bại." -f $drv) "ERROR"
+                Write-Log ("Khoi dong copy lai o {0} that bai, giu nguyen loi truoc do." -f $drv) "ERROR"
             }
         }
-    }
-
-    $ans = Read-Host ("Ổ {0} gặp lỗi (ExitCode={1}). Cắm lại/Remount nếu đã rút, nhập Y để thử copy lại, phím khác = bỏ qua ổ này" -f $drv, $code)
-    if ($ans -and $ans.ToUpper() -eq 'Y') {
-        if (-not (Wait-DriveReady $drv 60)) {
-            Write-Log ("Ổ {0} vẫn không sẵn sàng sau 60s. Bỏ qua ổ này." -f $drv) "ERROR"
-            continue
+        else {
+            Write-Log ("Nguoi dung chon bo qua copy cho o {0}." -f $drv) "WARN"
         }
-        Write-Log ("Thử copy lại ổ {0}..." -f $drv)
-        $retryProc = Start-CopyProcess -DriveLetter $drv -UseMirror ($MirrorTargets -contains $drv) -ThreadNo $threadNo
-        if ($retryProc) {
-            $copyResults.Remove($drv) | Out-Null
-            $active += $retryProc
-        } else {
-            Write-Log ("Khởi động copy lại ổ {0} thất bại, giữ nguyên lỗi trước đó." -f $drv) "ERROR"
-        }
-    }
-    else {
-        Write-Log ("Người dùng chọn bỏ qua copy cho ổ {0}." -f $drv) "WARN"
     }
 }
 
@@ -766,4 +769,3 @@ else {
 Write-Log "===== QUY TRÌNH HOÀN THÀNH ====="
 Write-Host ""
 Write-Host "Log file: $LogFile" -ForegroundColor Cyan
-
