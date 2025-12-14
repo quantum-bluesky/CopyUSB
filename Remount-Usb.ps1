@@ -92,7 +92,7 @@ function Capture-UsbState([string]$letter, [string]$path) {
   ($cache | ConvertTo-Json -Depth 6) | Set-Content -Path $path -Encoding UTF8
 
   Write-Host "OK: Đã capture $letter`: -> $path"
-  Write-Host ("    Disk# {0}, Size {1:N1}GB, BusType {2}, Serial '{3}'" -f $entry.DiskNumber, ($entry.DiskSize/1GB), $entry.DiskBusType, ($entry.DiskSerial ?? ""))
+  Write-Host ("    Disk# {0}, Size {1:N1}GB, BusType {2}, Serial '{3}'" -f $entry.DiskNumber, ($entry.DiskSize/1GB), $entry.DiskBusType, $(if ($entry.DiskSerial) { $entry.DiskSerial } else { "" }))
 }
 
 function Try-Reset-OnlyDevice([string]$pnpId) {
@@ -147,7 +147,7 @@ function Remount-FromCache([string]$letter, [string]$path, [int]$waitSec) {
   Ensure-Letter-Free $letter
 
   Write-Host "Loaded cache for $letter`: (CapturedAt $($entry.CapturedAt))"
-  Write-Host ("  DiskFriendlyName: {0}; DiskSize: {1:N1}GB; Serial: '{2}'" -f $entry.DiskFriendlyName, ($entry.DiskSize/1GB), ($entry.DiskSerial ?? ""))
+  Write-Host ("  DiskFriendlyName: {0}; DiskSize: {1:N1}GB; Serial: '{2}'" -f $entry.DiskFriendlyName, ($entry.DiskSize/1GB), $(if ($entry.DiskSerial) { $entry.DiskSerial } else { "" }))
 
   # 1) Rescan + chờ Windows tự mount lại
   Rescan-Storage

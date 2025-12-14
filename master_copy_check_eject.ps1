@@ -1,4 +1,4 @@
-﻿param(
+param(
     # Thư mục nguồn cần copy (chứa dữ liệu gốc)
     [string]$SourceRoot = "D:\A Di Da Phat",
 
@@ -103,6 +103,17 @@ function Wait-DriveReady {
     return $false
 }
 
+# Chon binary PowerShell: uu tien pwsh 7+ neu co, fallback powershell.exe
+function Get-PreferredShellExe {
+    $pwshCmd = Get-Command pwsh -ErrorAction SilentlyContinue
+    if ($pwshCmd -and $pwshCmd.Source) {
+        try { if ($pwshCmd.Version.Major -ge 7) { return $pwshCmd.Source } }
+        catch { return $pwshCmd.Source }
+    }
+    return "powershell.exe"
+}
+$script:ShellExe = Get-PreferredShellExe
+
 # Bao dam duong dan khi dua vao cmdline khong lam thoat dau nhay do backslash cuoi
 function Quote-PathArg {
     param([string]$Path)
@@ -129,7 +140,7 @@ function Try-RemountDrive {
 
     Write-Log ("Thử remount ổ {0}..." -f $DriveLetter) "WARN"
     try {
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $RemountScriptPath -Mode Remount -Drive $DriveLetter -CachePath $RemountCachePath -WaitSec $WaitSec
+        & $script:ShellExe -NoProfile -ExecutionPolicy Bypass -File $RemountScriptPath -Mode Remount -Drive $DriveLetter -CachePath $RemountCachePath -WaitSec $WaitSec
         $code = $LASTEXITCODE
     }
     catch {
@@ -269,6 +280,11 @@ function Get-SourceSize {
 }
 
 $sourceSize = Get-SourceSize -Path $SourceRoot
+# Neu khong co du lieu nguon thi dung luon, tranh chay format/copy khong can thiet
+if ($sourceSize -le 0) {
+    Write-Log "Source khong co du lieu (0 byte). Dung quy trinh, khong thuc hien copy/check/eject." "WARN"
+    exit 0
+}
 
 # ================== LỌC CHỈ Ổ USB (REMOVABLE) ==================
 Write-Log "Đang dò danh sách ổ USB (removable)..."
@@ -287,15 +303,27 @@ foreach ($drv in $DestDrives) {
     $upper = $drv.ToUpper()
     if ($usbMap.ContainsKey($upper)) {
         $disk = $usbMap[$upper]
-        Write-Log ("Ổ {0} (USB) Size={1:N2}GB, Free={2:N2}GB" -f `
+        $rootPath = "$upper\\"
+        if (-not (Test-Path -LiteralPath $rootPath)) {
+            Write-Log "? ${upper}: khong truy cap duoc (Test-Path fail). Bo qua." "WARN"
+            continue
+        }
+        if (-not $disk.Size -or $disk.Size -le 0) {
+            Write-Log "? $upper co Size=0 (co the khong co the nho). Bo qua." "WARN"
+            continue
+        }
+        if ($disk.Size -lt $sourceSize) {
+            Write-Log ("? {0} co Size {1:N2}GB nho hon dung luong source {2:N2}GB. Bo qua." -f $upper, ($disk.Size/1GB), ($sourceSize/1GB)) "WARN"
+            continue
+        }
+        Write-Log ("? {0} (USB) Size={1:N2}GB, Free={2:N2}GB" -f `
                 $upper, ($disk.Size / 1GB), ($disk.FreeSpace / 1GB))
         $ValidTargets += $upper
     }
     else {
-        Write-Log "Ổ $upper KHÔNG phải USB (hoặc không tìm thấy). Bỏ qua." "WARN"
+        Write-Log "? $upper KHONG phai USB (hoac khong tim thay). Bo qua." "WARN"
     }
 }
-
 if ($ValidTargets.Count -eq 0) {
     Write-Log "Không có ổ USB hợp lệ để xử lý." "ERROR"
     exit 1
@@ -306,7 +334,7 @@ if (Test-Path $RemountScriptPath) {
     Write-Log "Capture thông tin remount cho các ổ USB hợp lệ..."
     foreach ($drv in $ValidTargets) {
         try {
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $RemountScriptPath -Mode Capture -Drive $drv -CachePath $RemountCachePath
+            & $script:ShellExe -NoProfile -ExecutionPolicy Bypass -File $RemountScriptPath -Mode Capture -Drive $drv -CachePath $RemountCachePath
             $capCode = $LASTEXITCODE
             if ($capCode -eq 0) {
                 Write-Log ("Capture remount OK cho ổ {0}, cache: {1}" -f $drv, $RemountCachePath)
@@ -375,7 +403,7 @@ foreach ($drv in $ValidTargets) {
         ($totalSize / 1GB), ($freeSpace / 1GB), $usedMB, $usedPct)
 
     # *** BƯỚC 0: check capacity tổng có đủ chứa source không ***
-    if ($totalSize -gt $sourceSize) {
+    if ($totalSize -ge $sourceSize) {
 
         # BƯỚC 1: quyết định xử lý dữ liệu hiện có
         $skipCleanup = $false
@@ -435,7 +463,7 @@ foreach ($drv in $ValidTargets) {
                         "-HashLastN", "0"
                     )
                     if ($LogFile) { $quickArgs += @("-LogFile", $LogFile) }
-                    & powershell.exe @quickArgs
+                    & $script:ShellExe @quickArgs
                     $quickCode = $LASTEXITCODE
                     $mirrorCopy = $false
                     switch ($quickCode) {
@@ -697,7 +725,7 @@ else {
         )
     }
 
-    & powershell.exe @checkArgs
+    & $script:ShellExe @checkArgs
     $checkCode = $LASTEXITCODE
 
     if ($checkCode -ne 0) {
@@ -724,7 +752,7 @@ else {
         "-File", $ejectScriptFull
     ) + $drvArgs
 
-    & powershell.exe @argListEject
+    & $script:ShellExe @argListEject
     $ejectCode = $LASTEXITCODE
 
     if ($ejectCode -ne 0) {
@@ -738,3 +766,4 @@ else {
 Write-Log "===== QUY TRÌNH HOÀN THÀNH ====="
 Write-Host ""
 Write-Host "Log file: $LogFile" -ForegroundColor Cyan
+

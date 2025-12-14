@@ -182,6 +182,12 @@ function Get-SelfPowerShellExe {
     # fall through
   }
 
+  $pwshCmd = Get-Command pwsh -ErrorAction SilentlyContinue
+  if ($pwshCmd -and $pwshCmd.Source) {
+    try { if ($pwshCmd.Version.Major -ge 7) { return $pwshCmd.Source } }
+    catch { return $pwshCmd.Source }
+  }
+
   if ($PSVersionTable.PSEdition -eq "Core") { return (Join-Path $PSHOME "pwsh.exe") }
   return (Join-Path $PSHOME "powershell.exe")
 }
