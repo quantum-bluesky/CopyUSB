@@ -1,4 +1,4 @@
-﻿param(
+param(
     # Thư mục nguồn cần copy (chứa dữ liệu gốc)
     [string]$SourceRoot = "D:\A Di Da Phat",
 
@@ -25,28 +25,42 @@
     [string]$LogDir = ".\logs",
 
     # Không hỏi confirm (auto yes)
-    [switch]$AutoYes
-)
+    # Khong hoi confirm (auto yes)
+    [switch]$AutoYes,
+
+    # Bo qua buoc Eject
+    [switch]$SkipEject
+)    
+# Ghi nhan trang thai tham so/duong dan truoc khi chuan hoa
+$script:SkipEjectEffective = $SkipEject
+$script:CheckPathIsEmpty = [string]::IsNullOrWhiteSpace($CheckScriptPath)
+$script:EjectPathIsEmpty = [string]::IsNullOrWhiteSpace($EjectScriptPath)
+$script:RemountScriptIsEmpty = [string]::IsNullOrWhiteSpace($RemountScriptPath)
+$script:RemountCacheIsEmpty  = [string]::IsNullOrWhiteSpace($RemountCachePath)
+$script:LogDirIsEmpty        = [string]::IsNullOrWhiteSpace($LogDir)
+
+if ($script:EjectPathIsEmpty) {
+    $script:SkipEjectEffective = $true
+}
 # Gốc thực thi (để xử lý đường dẫn tương đối khi chạy từ cwd khác)
 $ScriptDir = if ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { (Get-Location).ProviderPath }
 
 # Chuẩn hoá đường dẫn tương đối thành tuyệt đối (dựa trên thư mục script)
-if (-not [System.IO.Path]::IsPathRooted($CheckScriptPath)) {
+if (-not $script:CheckPathIsEmpty -and -not [System.IO.Path]::IsPathRooted($CheckScriptPath)) {
     $CheckScriptPath = Join-Path $ScriptDir $CheckScriptPath
 }
-if (-not [System.IO.Path]::IsPathRooted($EjectScriptPath)) {
+if (-not $script:SkipEjectEffective -and -not $script:EjectPathIsEmpty -and -not [System.IO.Path]::IsPathRooted($EjectScriptPath)) {
     $EjectScriptPath = Join-Path $ScriptDir $EjectScriptPath
 }
-if (-not [System.IO.Path]::IsPathRooted($RemountScriptPath)) {
+if (-not $script:RemountScriptIsEmpty -and -not [System.IO.Path]::IsPathRooted($RemountScriptPath)) {
     $RemountScriptPath = Join-Path $ScriptDir $RemountScriptPath
 }
-if (-not [System.IO.Path]::IsPathRooted($RemountCachePath)) {
+if (-not $script:RemountCacheIsEmpty -and -not [System.IO.Path]::IsPathRooted($RemountCachePath)) {
     $RemountCachePath = Join-Path $ScriptDir $RemountCachePath
 }
-if (-not [System.IO.Path]::IsPathRooted($LogDir)) {
+if (-not $script:LogDirIsEmpty -and -not [System.IO.Path]::IsPathRooted($LogDir)) {
     $LogDir = Join-Path $ScriptDir $LogDir
 }
-
 # Kiểm tra quyền admin (phục vụ cảnh báo remount)
 $script:IsAdmin = $false
 try {
@@ -157,6 +171,10 @@ function Try-RemountDrive {
     return $false
 }
 # ================== KHỞI TẠO LOG ==================
+if ($script:LogDirIsEmpty) {
+    Write-Host "Thư mục log rỗng. Vui lòng chỉ định -LogDir hợp lệ." -ForegroundColor Red
+    exit 1
+}
 if (-not (Test-Path $LogDir)) {
     New-Item -Path $LogDir -ItemType Directory -Force | Out-Null
 }
@@ -165,7 +183,6 @@ $script:LogFile = Join-Path $LogDir $logName
 $script:LogFile = [System.IO.Path]::GetFullPath($script:LogFile)
 
 Write-Log "===== BẮT ĐẦU QUY TRÌNH COPY - CHECK - EJECT ====="
-
 # ================== KIỂM TRA THAM SỐ CƠ BẢN ==================
 
 if (-not (Test-Path $SourceRoot)) {
@@ -174,9 +191,34 @@ if (-not (Test-Path $SourceRoot)) {
     Write-Host "Vui lòng kiểm tra lại tham số -SourceRoot." -ForegroundColor Red
     exit 1
 }
-# Chuẩn hoá SourceRoot: bỏ nháy thừa, chuyển thành full path
+# Chuẩn hóa SourceRoot: bỏ nháy thừa, chuyển thành full path
 $SourceRoot = $SourceRoot.Trim('"')
 $SourceRoot = (Resolve-Path $SourceRoot).ProviderPath
+
+# Validate script CHECK
+if ($script:CheckPathIsEmpty) {
+    Write-Log "CheckScriptPath rỗng. Vui lòng chỉ định đường dẫn hợp lệ." "ERROR"
+    exit 1
+}
+if (-not (Test-Path $CheckScriptPath)) {
+    Write-Log "Script CHECK không tồn tại: $CheckScriptPath" "ERROR"
+    exit 1
+}
+
+# X? ly SkipEject va validate script EJECT
+if (-not $script:SkipEjectEffective) {
+    if ($script:EjectPathIsEmpty) {
+        Write-Log "EjectScriptPath rỗng -> bỏ qua bước EJECT." "WARN"
+        $script:SkipEjectEffective = $true
+    } elseif (-not (Test-Path $EjectScriptPath)) {
+        Write-Log "Script EJECT không tồn tại: $EjectScriptPath" "ERROR"
+        exit 1
+    }
+} elseif ($script:EjectPathIsEmpty) {
+    Write-Log "EjectScriptPath rỗng -> bỏ qua bước EJECT." "WARN"
+} else {
+    Write-Log "Bỏ qua bước EJECT (SkipEject được bật)." "WARN"
+}
 
 if (-not $DestDrives -or $DestDrives.Count -eq 0) {
     Write-Log "Không có ổ đích nào được chỉ định." "ERROR"
@@ -328,9 +370,15 @@ if ($ValidTargets.Count -eq 0) {
     Write-Log "Không có ổ USB hợp lệ để xử lý." "ERROR"
     exit 1
 }
-
-# ================== CAPTURE THÔNG TIN REMOUNT ==================
-if (Test-Path $RemountScriptPath) {
+# ================== CAPTURE THONG TIN REMOUNT ==================
+if ($script:RemountScriptIsEmpty -or $script:RemountCacheIsEmpty) {
+    if ($script:RemountScriptIsEmpty) {
+        Write-Log "RemountScriptPath rỗng -> không thể capture/remount khi có lỗi." "WARN"
+    }
+    if ($script:RemountCacheIsEmpty) {
+        Write-Log "RemountCachePath rỗng -> không thể lưu cache remount, bỏ qua remount." "WARN"
+    }
+} elseif (Test-Path $RemountScriptPath) {
     Write-Log "Capture thông tin remount cho các ổ USB hợp lệ..."
     foreach ($drv in $ValidTargets) {
         try {
@@ -343,7 +391,7 @@ if (Test-Path $RemountScriptPath) {
             }
         }
         catch {
-            Write-Log ("Lỗi khi capture remount ổ {0}: {1}" -f $drv, $_) "WARN"
+            Write-Log ("Lỗi khi capture remount ở {0}: {1}" -f $drv, $_) "WARN"
         }
     }
 } else {
@@ -721,55 +769,36 @@ else {
         "-HashLastN", $HashLastN,
         "-HashAlgorithm", $HashAlgorithm
     )
-
-    if ($EnableHash) {
-        $checkArgs += @(
-            "-Hash"
-        )
-    }
-
     Write-Log ("CMD CHECK: {0} {1}" -f $script:ShellExe, ($checkArgs -join ' '))
     & $script:ShellExe @checkArgs
     $checkCode = $LASTEXITCODE
-
     if ($checkCode -ne 0) {
         Write-Log ("BƯỚC CHECK báo lỗi (ExitCode={0}). DỪNG, KHÔNG EJECT." -f $checkCode) "ERROR"
         exit 1
-    }
-    else {
-        Write-Log "BƯỚC CHECK hoàn tất, không có lỗi nghiêm trọng."
+    } else {
+        Write-Log "BƯỚC CHECK hoàn tất."
     }
 }
-
-# ================== BƯỚC 4: EJECT ==================
-if (-not (Test-Path $EjectScriptPath)) {
+    
+if ($script:SkipEjectEffective) {
+    Write-Log "Bỏ qua bước EJECT theo cấu hình." "WARN"
+} elseif (-not (Test-Path $EjectScriptPath)) {
     Write-Log "Không tìm thấy script EJECT: $EjectScriptPath. Bỏ qua bước EJECT." "WARN"
-}
-else {
+} else {
     Write-Log "BẮT ĐẦU BƯỚC EJECT với script: $EjectScriptPath"
-
     $drvArgs = $PreparedTargets | ForEach-Object { $_.ToLower() }
-
     $ejectScriptFull = [System.IO.Path]::GetFullPath($EjectScriptPath)
-    $argListEject = @(
-        "-NoProfile", "-ExecutionPolicy", "Bypass",
-        "-File", $ejectScriptFull
-    ) + $drvArgs
-
-    Write-Log ("CMD EJECT: {0} {1}" -f $script:ShellExe, ($argListEject -join ' '))
+    $argListEject = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $ejectScriptFull) + $drvArgs
+    Write-Log ("CMD EJECT: {0} {1}" -f $script:ShellExe, ($argListEject -join ' ' ))
     & $script:ShellExe @argListEject
     $ejectCode = $LASTEXITCODE
-
     if ($ejectCode -ne 0) {
-        Write-Log ("BƯỚC EJECT có lỗi (ExitCode={0})." -f $ejectCode) "ERROR"
-    }
-    else {
-        Write-Log "BƯỚC EJECT hoàn tất."
+        Write-Log ("Bước EJECT có lỗi (ExitCode={0})." -f $ejectCode) "ERROR"
+    } else {
+        Write-Log "Bước EJECT hoàn tất."
     }
 }
 
 Write-Log "===== QUY TRÌNH HOÀN THÀNH ====="
 Write-Host ""
 Write-Host "Log file: $LogFile" -ForegroundColor Cyan
-
-
