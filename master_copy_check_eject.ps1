@@ -1,4 +1,4 @@
-param(
+﻿param(
     # Thư mục nguồn cần copy (chứa dữ liệu gốc)
     [string]$SourceRoot = "D:\A Di Da Phat",
 
@@ -27,10 +27,10 @@ param(
     # Không hỏi confirm (auto yes)
     [switch]$AutoYes
 )
-# Goc thuc thi (de xu ly duong dan tuong doi khi chay tu cwd khac)
+# Gốc thực thi (để xử lý đường dẫn tương đối khi chạy từ cwd khác)
 $ScriptDir = if ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { (Get-Location).ProviderPath }
 
-# Chuan hoa duong dan tuong doi thanh tuyet doi (dua tren thu muc script)
+# Chuẩn hoá đường dẫn tương đối thành tuyệt đối (dựa trên thư mục script)
 if (-not [System.IO.Path]::IsPathRooted($CheckScriptPath)) {
     $CheckScriptPath = Join-Path $ScriptDir $CheckScriptPath
 }
@@ -103,7 +103,7 @@ function Wait-DriveReady {
     return $false
 }
 
-# Chon binary PowerShell: uu tien pwsh 7+ neu co, fallback powershell.exe
+# Chọn binary PowerShell: ưu tiên pwsh 7+ nếu có, fallback powershell.exe
 function Get-PreferredShellExe {
     $pwshCmd = Get-Command pwsh -ErrorAction SilentlyContinue
     if ($pwshCmd -and $pwshCmd.Source) {
@@ -114,13 +114,13 @@ function Get-PreferredShellExe {
 }
 $script:ShellExe = Get-PreferredShellExe
 
-# Bao dam duong dan khi dua vao cmdline khong lam thoat dau nhay do backslash cuoi
+# Bảo đảm đường dẫn khi đưa vào cmdline không làm thoát dấu nháy do backslash cuối
 function Quote-PathArg {
     param([string]$Path)
 
     $normalized = $Path.Trim('"')
     if ($normalized.EndsWith('\')) {
-        # Nhan doi backslash cuoi de khong nuot dau nhay ket thuc
+        # Nhân đôi backslash cuối để không nuốt dấu nháy kết thúc
         $normalized += '\'
     }
 
@@ -280,9 +280,9 @@ function Get-SourceSize {
 }
 
 $sourceSize = Get-SourceSize -Path $SourceRoot
-# Neu khong co du lieu nguon thi dung luon, tranh chay format/copy khong can thiet
+# Nếu không có dữ liệu nguồn thì dừng luôn, tránh chạy format/copy không cần thiết
 if ($sourceSize -le 0) {
-    Write-Log "Source khong co du lieu (0 byte). Dung quy trinh, khong thuc hien copy/check/eject." "WARN"
+    Write-Log "Source không có dữ liệu (0 byte). Dừng quy trình, không thực hiện copy/check/eject." "WARN"
     exit 0
 }
 
@@ -305,23 +305,23 @@ foreach ($drv in $DestDrives) {
         $disk = $usbMap[$upper]
         $rootPath = "$upper\\"
         if (-not (Test-Path -LiteralPath $rootPath)) {
-            Write-Log "? ${upper}: khong truy cap duoc (Test-Path fail). Bo qua." "WARN"
+            Write-Log "? ${upper}: không truy cập được (Test-Path thất bại). Bỏ qua." "WARN"
             continue
         }
         if (-not $disk.Size -or $disk.Size -le 0) {
-            Write-Log "? $upper co Size=0 (co the khong co the nho). Bo qua." "WARN"
+            Write-Log "Ổ $upper có Size=0 (có thể không có thẻ nhớ). Bỏ qua." "WARN"
             continue
         }
         if ($disk.Size -lt $sourceSize) {
-            Write-Log ("? {0} co Size {1:N2}GB nho hon dung luong source {2:N2}GB. Bo qua." -f $upper, ($disk.Size/1GB), ($sourceSize/1GB)) "WARN"
+            Write-Log ("Ổ {0} có Size {1:N2}GB nhỏ hơn dung lượng source {2:N2}GB. Bỏ qua." -f $upper, ($disk.Size/1GB), ($sourceSize/1GB)) "WARN"
             continue
         }
-        Write-Log ("? {0} (USB) Size={1:N2}GB, Free={2:N2}GB" -f `
+        Write-Log ("Ổ {0} (USB) Size={1:N2}GB, Free={2:N2}GB" -f `
                 $upper, ($disk.Size / 1GB), ($disk.FreeSpace / 1GB))
         $ValidTargets += $upper
     }
     else {
-        Write-Log "? $upper KHONG phai USB (hoac khong tim thay). Bo qua." "WARN"
+        Write-Log "Ổ $upper KHÔNG phải USB (hoặc không tìm thấy). Bỏ qua." "WARN"
     }
 }
 if ($ValidTargets.Count -eq 0) {
@@ -653,44 +653,44 @@ while ($active.Count -gt 0) {
 
         Write-Log ("COPY toi {0} THAT BAI. ExitCode={1}" -f $drv, $code) "ERROR"
         if ($AutoYes) {
-            Write-Log "AutoYes dang bat -> khong thu lai copy cho o nay." "ERROR"
+            Write-Log "AutoYes đang bật -> không thử lại copy cho ổ này." "ERROR"
             continue
         }
 
         $stillThere = Test-Path ($drv + "\\")
         if (-not $stillThere) {
-            Write-Log ("O {0} khong con san sang (co the bi rut). Thu remount..." -f $drv) "ERROR"
+            Write-Log ("Ổ {0} không còn sẵn sàng (có thể bị rút). Thử remount..." -f $drv) "ERROR"
             $remounted = Try-RemountDrive -DriveLetter $drv -WaitSec 30
             if ($remounted) {
-                Write-Log ("Remount o {0} thanh cong, thu copy lai..." -f $drv) "WARN"
+                Write-Log ("Remount ổ {0} thành công, thử copy lại..." -f $drv) "WARN"
                 $retryProc = Start-CopyProcess -DriveLetter $drv -UseMirror ($MirrorTargets -contains $drv) -ThreadNo $threadNo
                 if ($retryProc) {
                     $copyResults.Remove($drv) | Out-Null
                     $active += $retryProc
                     continue
                 } else {
-                    Write-Log ("Khoi dong copy lai o {0} sau remount that bai." -f $drv) "ERROR"
+                    Write-Log ("Khởi động copy lại ổ {0} sau remount thất bại." -f $drv) "ERROR"
                 }
             }
         }
 
-        $ans = Read-Host ("O {0} gap loi (ExitCode={1}). Cam lai/Remount neu da rut, nhap Y de thu copy lai, phim khac = bo qua o nay" -f $drv, $code)
+        $ans = Read-Host ("Ổ {0} gặp lỗi (ExitCode={1}). Cắm lại/Remount nếu đã rút, nhập Y để thử copy lại, phím khác = bỏ qua ổ này" -f $drv, $code)
         if ($ans -and $ans.ToUpper() -eq 'Y') {
             if (-not (Wait-DriveReady $drv 60)) {
-                Write-Log ("O {0} van khong san sang sau 60s. Bo qua o nay." -f $drv) "ERROR"
+                Write-Log ("Ổ {0} vẫn không sẵn sàng sau 60s. Bỏ qua ổ này." -f $drv) "ERROR"
                 continue
             }
-            Write-Log ("Thu copy lai o {0}..." -f $drv)
+            Write-Log ("Thử copy lại ổ {0}..." -f $drv)
             $retryProc = Start-CopyProcess -DriveLetter $drv -UseMirror ($MirrorTargets -contains $drv) -ThreadNo $threadNo
             if ($retryProc) {
                 $copyResults.Remove($drv) | Out-Null
                 $active += $retryProc
             } else {
-                Write-Log ("Khoi dong copy lai o {0} that bai, giu nguyen loi truoc do." -f $drv) "ERROR"
+                Write-Log ("Khởi động copy lại ổ {0} thất bại, giữ nguyên lỗi trước đó." -f $drv) "ERROR"
             }
         }
         else {
-            Write-Log ("Nguoi dung chon bo qua copy cho o {0}." -f $drv) "WARN"
+            Write-Log ("Người dùng chọn bỏ qua copy cho ổ {0}." -f $drv) "WARN"
         }
     }
 }
@@ -771,3 +771,5 @@ else {
 Write-Log "===== QUY TRÌNH HOÀN THÀNH ====="
 Write-Host ""
 Write-Host "Log file: $LogFile" -ForegroundColor Cyan
+
+
