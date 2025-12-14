@@ -714,20 +714,21 @@ else {
         "-File", $checkScriptFull,
         "-SourceRoot", $SourceRoot,
         "-DestDrives"
-    ) + $PreparedTargets + @(
+    ) + @($PreparedTargets) + @(
         "-NoConfirm",
         "-NoPause",
-        "-LogFile", $LogFile
+        "-LogFile", $LogFile,
+        "-HashLastN", $HashLastN,
+        "-HashAlgorithm", $HashAlgorithm
     )
 
     if ($EnableHash) {
         $checkArgs += @(
-            "-Hash",
-            "-HashLastN", $HashLastN,
-            "-HashAlgorithm", $HashAlgorithm
+            "-Hash"
         )
     }
 
+    Write-Log ("CMD CHECK: {0} {1}" -f $script:ShellExe, ($checkArgs -join ' '))
     & $script:ShellExe @checkArgs
     $checkCode = $LASTEXITCODE
 
@@ -755,6 +756,7 @@ else {
         "-File", $ejectScriptFull
     ) + $drvArgs
 
+    Write-Log ("CMD EJECT: {0} {1}" -f $script:ShellExe, ($argListEject -join ' '))
     & $script:ShellExe @argListEject
     $ejectCode = $LASTEXITCODE
 
