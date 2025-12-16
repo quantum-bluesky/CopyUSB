@@ -3,16 +3,31 @@
   [ValidateSet("Capture","Remount")]
   [string]$Mode,
 
-  [Parameter(Mandatory=$true)]
+  #[Parameter(Mandatory=$true)]
   [ValidatePattern("^[A-Za-z]:?$")]
-  [string]$Drive,
+  [string[]]$Drive=@("F:","G:","H:","I:","J:","K:","L:","M:"),
 
   [string]$CachePath = "$PSScriptRoot\usb_remount_cache.json",
 
   # thời gian chờ mount lại
   [int]$WaitSec = 12
 )
-
+#TODO Fix Remount-Usb.ps1 to avoid remounting when letter is already used by another drive
+#TODO Fix Remount-Usb.ps1 when letter is already but usb drive is not available
+<# log 
+[2025-12-17 06:59:45] [ERROR] COPY toi K: THAT BAI. ExitCode=16
+[2025-12-17 06:59:45] [ERROR] Ổ K: không còn sẵn sàng (có thể bị rút). Thử remount...
+[2025-12-17 06:59:45] [WARN] Thử remount ổ K:...
+[2025-12-17 07:00:19] [WARN] Remount ổ K: thất bại (ExitCode=0).
+[2025-12-17 07:00:19] [WARN] Remount ổ K: thành công, thử copy lại...
+[2025-12-17 07:00:50] [ERROR] Ổ K: KHÔNG ready trước khi copy.
+[2025-12-17 07:00:50] [WARN] Thử remount ổ K:...
+[2025-12-17 07:01:23] [WARN] Remount ổ K: thất bại (ExitCode=0).
+[2025-12-17 07:01:23] [WARN] Ổ K: đã remount, tiếp tục copy.
+[2025-12-17 07:01:23] [INFO] Chạy robocopy tới K:: robocopy "D:\CMD\CopyUSB\Test\Test3\\" "K:\Test3" /E /R:2 /W:2 /LOG+:D:\CMD\CopyUSB\logs\copycheckeject_20251217_065926.log /NFL /NDL /NP /Z /MT:8
+[2025-12-17 07:01:23] [ERROR] COPY toi K: THAT BAI. ExitCode=16
+[2025-12-17 07:01:23] [ERROR] Ổ K: không còn sẵn sàng (có thể bị rút). Thử remount...
+#>
 function Assert-Admin {
   $id = [Security.Principal.WindowsIdentity]::GetCurrent()
   $p  = [Security.Principal.WindowsPrincipal]::new($id)
@@ -36,12 +51,13 @@ function Rescan-Storage {
   try { Update-HostStorageCache | Out-Null } catch {}
   "rescan" | diskpart | Out-Null
 }
-
 function Ensure-Letter-Free([string]$letter) {
   $vol = Get-Volume -ErrorAction SilentlyContinue | Where-Object DriveLetter -eq $letter
   if ($vol) {
-    throw "Drive letter $letter`: đang bị ổ khác dùng (Label: $($vol.FileSystemLabel)). Hãy giải phóng/đổi letter trước."
+    Write-Host ("Cảnh báo: ký tự ổ {0}: đang được ổ khác dùng (Label: {1}). Bỏ qua remount cho ổ này." -f $letter, ($vol.FileSystemLabel))
+    return $false
   }
+  return $true
 }
 
 function Get-DiskDriveCimByIndex([int]$idx) {
@@ -49,7 +65,6 @@ function Get-DiskDriveCimByIndex([int]$idx) {
     Where-Object { $_.Index -eq $idx } |
     Select-Object -First 1
 }
-
 function Capture-UsbState([string]$letter, [string]$path) {
   if (-not (Test-Path ("$letter`:\"))) { throw "Không thấy $letter`:\. Hãy capture khi ổ đang mount." }
 
@@ -144,7 +159,7 @@ function Remount-FromCache([string]$letter, [string]$path, [int]$waitSec) {
   if (-not $cache.ContainsKey($letter)) { throw "Cache không có entry cho $letter`:. Hãy Capture ổ đó khi đang mount." }
   $entry = $cache[$letter]
 
-  Ensure-Letter-Free $letter
+  if (-not (Ensure-Letter-Free $letter)) { return }
 
   Write-Host "Loaded cache for $letter`: (CapturedAt $($entry.CapturedAt))"
   Write-Host ("  DiskFriendlyName: {0}; DiskSize: {1:N1}GB; Serial: '{2}'" -f $entry.DiskFriendlyName, ($entry.DiskSize/1GB), $(if ($entry.DiskSerial) { $entry.DiskSerial } else { "" }))
@@ -206,9 +221,10 @@ function Remount-FromCache([string]$letter, [string]$path, [int]$waitSec) {
 
 # ===== MAIN =====
 Assert-Admin
-$L = Normalize-Letter $Drive
+$letters = @($Drive | Where-Object { $_ } | ForEach-Object { Normalize-Letter $_ } | Where-Object { $_ })
+if ($letters.Count -eq 0) { throw "Tham so -Drive rong hoac khong hop le." }
 
 switch ($Mode) {
-  "Capture" { Capture-UsbState $L $CachePath }
-  "Remount" { Remount-FromCache $L $CachePath $WaitSec }
+  "Capture" { foreach ($L in $letters) { Capture-UsbState $L $CachePath } }
+  "Remount" { foreach ($L in $letters) { Remount-FromCache $L $CachePath $WaitSec } }
 }
