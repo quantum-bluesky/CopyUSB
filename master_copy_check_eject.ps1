@@ -683,7 +683,11 @@ foreach ($drv in $PreparedTargets) {
 # Giam sat tien trinh copy theo o
 while ($active.Count -gt 0) {
     $procs = $active | Select-Object -ExpandProperty Process
-    [void](Wait-Process -InputObject $procs -Any -Timeout 5)
+    try {
+        [void](Wait-Process -InputObject $procs -Any -Timeout 5 -ErrorAction SilentlyContinue)
+    } catch {
+        Start-Sleep -Seconds 1
+    }
 
     $doneSet = $active | Where-Object { $_.Process.HasExited }
     if (-not $doneSet) { continue }
