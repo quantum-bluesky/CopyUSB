@@ -44,75 +44,75 @@
   Build guide: .\yafs\BuildGuide.md
 #>
 
-[CmdletBinding(DefaultParameterSetName="Run")]
+[CmdletBinding(DefaultParameterSetName = "Run")]
 param(
-  [Parameter(ParameterSetName="Run")]
-  [Parameter(ParameterSetName="InstallYafs")]
-  [string]$YafsPath="C:\Tools\yafs\yafs.exe",
+  [Parameter(ParameterSetName = "Run")]
+  [Parameter(ParameterSetName = "InstallYafs")]
+  [string]$YafsPath = "C:\Tools\yafs\yafs.exe",
 
-  [Parameter(Mandatory=$true, ParameterSetName="Run")]
+  [Parameter(Mandatory = $true, ParameterSetName = "Run")]
   [string[]]$Device,
 
-  [Parameter(Mandatory=$true, ParameterSetName="Run")]
-  [ValidateSet("CheckOnly","SortOnlyAuto","SortOnlyFromTree","CheckAndSort")]
+  [Parameter(Mandatory = $true, ParameterSetName = "Run")]
+  [ValidateSet("CheckOnly", "SortOnlyAuto", "SortOnlyFromTree", "CheckAndSort")]
   [string]$Mode,
 
   # Sort scope
   # - Both        : sort directory + file at every level (default)
   # - FoldersOnly : only sort <directory> siblings; keep <file> order as-is
   # - FilesOnly   : only sort <file> siblings; keep <directory> order as-is
-  [Parameter(ParameterSetName="Run")]
-  [ValidateSet("Both","FoldersOnly","FilesOnly")]
+  [Parameter(ParameterSetName = "Run")]
+  [ValidateSet("Both", "FoldersOnly", "FilesOnly")]
   [string]$SortScope = "Both",
 
   # File filtering
   # Default: only sort/check media files (audio/video). Non-media files are ignored.
-  [Parameter(ParameterSetName="Run")]
-  [ValidateSet("MediaOnly","AllFiles")]
+  [Parameter(ParameterSetName = "Run")]
+  [ValidateSet("MediaOnly", "AllFiles")]
   [string]$FileFilter = "MediaOnly",
 
   # Where to dump current tree (from yafs -r). Default: .\tree.xml
-  [Parameter(ParameterSetName="Run")]
+  [Parameter(ParameterSetName = "Run")]
   [string]$TreeOut = (Join-Path (Get-Location) "tree.xml"),
 
   # Where to write sorted tree xml. Default: .\tree_sorted.xml
-  [Parameter(ParameterSetName="Run")]
+  [Parameter(ParameterSetName = "Run")]
   [string]$SortedTreeOut = (Join-Path (Get-Location) "tree_sorted.xml"),
 
   # Tree file to apply (for SortOnlyFromTree). If omitted, use -SortedTreeOut
-  [Parameter(ParameterSetName="Run")]
+  [Parameter(ParameterSetName = "Run")]
   [string]$TreeIn,
 
   # Confirm before writing to device (unless -Force)
-  [Parameter(ParameterSetName="Run")]
+  [Parameter(ParameterSetName = "Run")]
   [switch]$Force,
 
   # Verbose-ish logging
-  [Parameter(ParameterSetName="Run")]
-  [Parameter(ParameterSetName="InstallYafs")]
+  [Parameter(ParameterSetName = "Run")]
+  [Parameter(ParameterSetName = "InstallYafs")]
   [switch]$VerboseLog,
 
-  [Parameter(ParameterSetName="Run")]
+  [Parameter(ParameterSetName = "Run")]
   [switch]$NoParallel,
 
-  [Parameter(ParameterSetName="Run")]
-  [ValidateRange(1,64)]
+  [Parameter(ParameterSetName = "Run")]
+  [ValidateRange(1, 64)]
   [int]$ThrottleLimit = 4,
 
-  [Parameter(Mandatory=$true, ParameterSetName="Help")]
-  [Alias("h","?")]
+  [Parameter(Mandatory = $true, ParameterSetName = "Help")]
+  [Alias("h", "?")]
   [switch]$Help,
 
-  [Parameter(Mandatory=$true, ParameterSetName="InstallYafs")]
+  [Parameter(Mandatory = $true, ParameterSetName = "InstallYafs")]
   [switch]$InstallYafs,
 
-  [Parameter(ParameterSetName="InstallYafs")]
+  [Parameter(ParameterSetName = "InstallYafs")]
   [string]$YafsSourceDir = (Join-Path $PSScriptRoot "yafs\bin")
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-
+chcp 65001 | Out-Null  # UTF-8
 function Write-Log([string]$msg) {
   if ($VerboseLog) { Write-Host $msg }
 }
@@ -129,11 +129,11 @@ function Normalize-DeviceToken([string]$token) {
   if ($t.Length -eq 0) { return $null }
 
   $t = $t.Trim("'").Trim('"')
-  $t = $t.TrimEnd('\','/')
+  $t = $t.TrimEnd('\', '/')
 
   if ($t -match '^[A-Za-z]$') { return ($t.ToLowerInvariant() + ":") }
-  if ($t -match '^[A-Za-z]:$') { return ($t.Substring(0,1).ToLowerInvariant() + ":") }
-  if ($t -match '^[A-Za-z]:') { return ($t.Substring(0,1).ToLowerInvariant() + ":") }
+  if ($t -match '^[A-Za-z]:$') { return ($t.Substring(0, 1).ToLowerInvariant() + ":") }
+  if ($t -match '^[A-Za-z]:') { return ($t.Substring(0, 1).ToLowerInvariant() + ":") }
 
   return $null
 }
@@ -149,7 +149,7 @@ function Parse-DeviceList([string[]]$deviceArgs) {
     if ($null -eq $d) { continue }
     if ($seen.Add($d)) { [void]$out.Add($d) }
   }
-  return ,$out.ToArray()
+  return , $out.ToArray()
 }
 
 function Test-DeviceReady([string]$device) {
@@ -157,7 +157,8 @@ function Test-DeviceReady([string]$device) {
   $root = "$device\\"
   try {
     return (Test-Path -LiteralPath $root)
-  } catch {
+  }
+  catch {
     return $false
   }
 }
@@ -178,7 +179,8 @@ function Get-SelfPowerShellExe {
   try {
     $p = Get-Process -Id $PID -ErrorAction Stop
     if ($p.Path -and (Test-Path -LiteralPath $p.Path)) { return $p.Path }
-  } catch {
+  }
+  catch {
     # fall through
   }
 
@@ -255,24 +257,24 @@ function Invoke-MultiDeviceRun(
       $treeOut = Get-DeviceSpecificPath $treeOutBase $d
       $sortedOut = if ($mode -eq "SortOnlyFromTree") { $sortedTreeOutBase } else { Get-DeviceSpecificPath $sortedTreeOutBase $d }
 
-      $argsList = @("-NoProfile","-ExecutionPolicy","Bypass","-File",$scriptPath,
-        "-YafsPath",$yafsPath,
-        "-Device",$d,
-        "-Mode",$mode,
-        "-SortScope",$sortScope,
-        "-FileFilter",$fileFilter,
-        "-TreeOut",$treeOut,
-        "-SortedTreeOut",$sortedOut
+      $argsList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $scriptPath,
+        "-YafsPath", $yafsPath,
+        "-Device", $d,
+        "-Mode", $mode,
+        "-SortScope", $sortScope,
+        "-FileFilter", $fileFilter,
+        "-TreeOut", $treeOut,
+        "-SortedTreeOut", $sortedOut
       )
-      if ($treeIn) { $argsList += @("-TreeIn",$treeIn) }
+      if ($treeIn) { $argsList += @("-TreeIn", $treeIn) }
       if ($force) { $argsList += "-Force" }
       if ($verboseLog) { $argsList += "-VerboseLog" }
 
       $outDir = Split-Path -Parent $treeOut
       if ($outDir) { New-Item -ItemType Directory -Force -Path $outDir | Out-Null }
 
-      $jobs += Start-Job -ArgumentList @($pwshExe,$argsList,$d) -ScriptBlock {
-        param($exe,$a,$dev)
+      $jobs += Start-Job -ArgumentList @($pwshExe, $argsList, $d) -ScriptBlock {
+        param($exe, $a, $dev)
         $o = & $exe @a 2>&1
         $c = $LASTEXITCODE
         $t = ""
@@ -299,16 +301,16 @@ function Invoke-MultiDeviceRun(
       $treeOut = Get-DeviceSpecificPath $treeOutBase $d
       $sortedOut = if ($mode -eq "SortOnlyFromTree") { $sortedTreeOutBase } else { Get-DeviceSpecificPath $sortedTreeOutBase $d }
 
-      $argsList = @("-NoProfile","-ExecutionPolicy","Bypass","-File",$scriptPath,
-        "-YafsPath",$yafsPath,
-        "-Device",$d,
-        "-Mode",$mode,
-        "-SortScope",$sortScope,
-        "-FileFilter",$fileFilter,
-        "-TreeOut",$treeOut,
-        "-SortedTreeOut",$sortedOut
+      $argsList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $scriptPath,
+        "-YafsPath", $yafsPath,
+        "-Device", $d,
+        "-Mode", $mode,
+        "-SortScope", $sortScope,
+        "-FileFilter", $fileFilter,
+        "-TreeOut", $treeOut,
+        "-SortedTreeOut", $sortedOut
       )
-      if ($treeIn) { $argsList += @("-TreeIn",$treeIn) }
+      if ($treeIn) { $argsList += @("-TreeIn", $treeIn) }
       if ($force) { $argsList += "-Force" }
       if ($verboseLog) { $argsList += "-VerboseLog" }
 
@@ -328,7 +330,8 @@ function Invoke-MultiDeviceRun(
       foreach ($line in ($r.Output -split "`r?`n")) {
         if ($line -ne "") { Write-Host ("[{0}] {1}" -f $r.Device, $line) }
       }
-    } else {
+    }
+    else {
       Write-Host ("[{0}] (no output)" -f $r.Device)
     }
   }
@@ -342,7 +345,8 @@ function Test-IsAdministrator {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
     $p = [Security.Principal.WindowsPrincipal]::new($id)
     return $p.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
-  } catch {
+  }
+  catch {
     return $false
   }
 }
@@ -366,7 +370,7 @@ function Invoke-YafsRead([string]$yafs, [string]$device, [string]$outFile) {
   $maxRetry = 1
   $delayMs = 500
   for ($attempt = 1; $attempt -le ($maxRetry + 1); $attempt++) {
-    $r = Invoke-Yafs $yafs @("-d",$device,"-r","-f",$outFile)
+    $r = Invoke-Yafs $yafs @("-d", $device, "-r", "-f", $outFile)
     if ($r.ExitCode -eq 0) { return }
 
     $isLockDenied = ($r.Output -match 'locking the file' -and $r.Output -match 'Access is denied')
@@ -390,7 +394,7 @@ function Invoke-YafsWrite([string]$yafs, [string]$device, [string]$inFile) {
   $maxRetry = 1
   $delayMs = 500
   for ($attempt = 1; $attempt -le ($maxRetry + 1); $attempt++) {
-    $r = Invoke-Yafs $yafs @("-d",$device,"-w","-f",$inFile)
+    $r = Invoke-Yafs $yafs @("-d", $device, "-w", "-f", $inFile)
     if ($r.ExitCode -eq 0) { return }
 
     $isLockDenied = ($r.Output -match 'locking the file' -and $r.Output -match 'Access is denied')
@@ -511,19 +515,20 @@ function Natural-KeyParts([string]$s) {
     if ($m -match '^\d+$') { $parts += [int]$m }
     else { $parts += $m.ToLowerInvariant() }
   }
-  return ,$parts
+  return , $parts
 }
 
 function Compare-Natural([string]$a, [string]$b) {
   $ka = Natural-KeyParts $a
   $kb = Natural-KeyParts $b
   $len = [Math]::Min($ka.Count, $kb.Count)
-  for ($i=0; $i -lt $len; $i++) {
+  for ($i = 0; $i -lt $len; $i++) {
     $pa = $ka[$i]; $pb = $kb[$i]
     if ($pa.GetType().Name -eq "Int32" -and $pb.GetType().Name -eq "Int32") {
       if ($pa -lt $pb) { return -1 }
       if ($pa -gt $pb) { return 1 }
-    } else {
+    }
+    else {
       $sa = "$pa"; $sb = "$pb"
       $c = [string]::Compare($sa, $sb, $true)
       if ($c -ne 0) { return $c }
@@ -540,22 +545,29 @@ function Confirm-Apply([string]$device, [string]$file) {
   return ($ans -match '^(y|yes)$')
 }
 
+function Format-OrderNames([xml]$xml, [object[]]$nodes) {
+  return @($nodes | ForEach-Object {
+      $t = if (Is-DirectoryNode $_) { "D" } else { "F" }
+      "{0}:{1}" -f $t, (Get-Name $xml $_)
+    })
+}
+
 function Sort-ArrayByNaturalName([xml]$xml, [object[]]$arr) {
   # Insertion sort using Compare-Natural
-  for ($i=1; $i -lt $arr.Count; $i++) {
+  for ($i = 1; $i -lt $arr.Count; $i++) {
     $tmp = $arr[$i]
     $j = $i - 1
     while ($j -ge 0 -and (Compare-Natural (Get-Name $xml $arr[$j]) (Get-Name $xml $tmp)) -gt 0) {
-      $arr[$j+1] = $arr[$j]
+      $arr[$j + 1] = $arr[$j]
       $j--
     }
-    $arr[$j+1] = $tmp
+    $arr[$j + 1] = $tmp
   }
   # Prevent PowerShell from unrolling a single-item array into a scalar XmlElement
-  return ,$arr
+  return , $arr
 }
 
-function Sort-Siblings([xml]$xml, $parentNode, [string]$sortScope, [string]$fileFilter) {
+function Sort-Siblings([xml]$xml, $parentNode, [string]$sortScope, [string]$fileFilter, [string]$path) {
   # Consider only eligible nodes, but keep all other nodes in place.
   $allNodes = @($parentNode.ChildNodes)
 
@@ -566,6 +578,8 @@ function Sort-Siblings([xml]$xml, $parentNode, [string]$sortScope, [string]$file
     }
   }
   if ($kids.Count -eq 0) { return $false }
+
+  $beforeOrder = Format-OrderNames $xml (@($kids))
 
   # Build desired order
   $desired = @()
@@ -588,9 +602,11 @@ function Sort-Siblings([xml]$xml, $parentNode, [string]$sortScope, [string]$file
   # Compare current vs desired by reference order
   $current = $kids
   $changed = $false
-  for ($i=0; $i -lt $current.Count; $i++) {
+  for ($i = 0; $i -lt $current.Count; $i++) {
     if (-not [object]::ReferenceEquals($current[$i], $desired[$i])) { $changed = $true; break }
   }
+
+  $afterOrder = Format-OrderNames $xml (@($desired))
 
   # Reorder in XML while keeping non-eligible nodes (non-media, etc.) in place
   if ($changed) {
@@ -600,21 +616,28 @@ function Sort-Siblings([xml]$xml, $parentNode, [string]$sortScope, [string]$file
       if (Should-ConsiderNodeForSort $xml $n $sortScope $fileFilter) {
         $newNodes += $desired[$desiredIndex]
         $desiredIndex++
-      } else {
+      }
+      else {
         $newNodes += $n
       }
     }
 
     foreach ($n in $allNodes) { [void]$parentNode.RemoveChild($n) }
     foreach ($n in $newNodes) { [void]$parentNode.AppendChild($n) }
+
+    Write-Host ("SORT_CHANGE at {0}" -f $path)
+    Show-SwappedPairsAny ($beforeOrder) ($afterOrder)
+    # Write-Host ("  BEFORE: {0}" -f ($beforeOrder -join " | "))
+    # Write-Host ("  AFTER : {0}" -f ($afterOrder -join " | "))
+
   }
 
   # Reassign order attributes for all file/directory siblings (match final XML order)
   $siblings = @($parentNode.ChildNodes | Where-Object {
-    $_.NodeType -eq [System.Xml.XmlNodeType]::Element -and ($_.Name -eq "directory" -or $_.Name -eq "file")
-  })
-  for ($i=0; $i -lt $siblings.Count; $i++) {
-    $newOrder = [string](($i+1) * 100)
+      $_.NodeType -eq [System.Xml.XmlNodeType]::Element -and ($_.Name -eq "directory" -or $_.Name -eq "file")
+    })
+  for ($i = 0; $i -lt $siblings.Count; $i++) {
+    $newOrder = [string](($i + 1) * 100)
     if ($siblings[$i].GetAttribute("order") -ne $newOrder) {
       $siblings[$i].SetAttribute("order", $newOrder)
       $changed = $true
@@ -624,13 +647,15 @@ function Sort-Siblings([xml]$xml, $parentNode, [string]$sortScope, [string]$file
   return $changed
 }
 
-function Walk-Sort([xml]$xml, $node, [string]$sortScope, [string]$fileFilter) {
+function Walk-Sort([xml]$xml, $node, [string]$path, [string]$sortScope, [string]$fileFilter) {
   $any = $false
-  if (Sort-Siblings $xml $node $sortScope $fileFilter) { $any = $true }
+  if (Sort-Siblings $xml $node $sortScope $fileFilter $path) { $any = $true }
 
   foreach ($child in @($node.ChildNodes)) {
     if ($child.Name -eq "directory" -and -not (Should-SkipNode $xml $child)) {
-      if (Walk-Sort $xml $child $sortScope $fileFilter) { $any = $true }
+      $childName = Get-Name $xml $child
+      $childPath = if ($path -eq "/root") { "/root/$childName" } else { "$path/$childName" }
+      if (Walk-Sort $xml $child $childPath $sortScope $fileFilter) { $any = $true }
     }
   }
   return $any
@@ -658,7 +683,8 @@ function Walk-Check([xml]$xml, $node, [string]$path, [string]$sortScope, [string
     $expectedKids = @()
     if ($sortScope -eq "FoldersOnly" -or $sortScope -eq "FilesOnly") {
       $expectedKids = Sort-ArrayByNaturalName $xml (@($kids))
-    } else {
+    }
+    else {
       $dirs = @(); $files = @()
       foreach ($k in $kids) { if (Is-DirectoryNode $k) { $dirs += $k } else { $files += $k } }
       if ($dirs.Count -gt 0) { $dirs = Sort-ArrayByNaturalName $xml (@($dirs)) }
@@ -692,6 +718,80 @@ function Walk-Check([xml]$xml, $node, [string]$path, [string]$sortScope, [string
   return $ok
 }
 
+function Get-OccurrenceKeys {
+  param([string[]]$Items)
+
+  $count = @{}
+  foreach ($x in $Items) {
+    if (-not $count.ContainsKey($x)) { $count[$x] = 0 }
+    $count[$x]++
+    "{0}@@{1}" -f $x, $count[$x]   # key duy nhất theo lần xuất hiện
+  }
+}
+
+# cách dùng:
+# Show-SwappedPairsAny -Before $before -After $after
+function Show-SwappedPairsAny {
+  param(
+    [Parameter(Mandatory)] [string[]] $Before,
+    [Parameter(Mandatory)] [string[]] $After
+  )
+
+  $B = $Before
+  $A = $After
+  # $B = $Before -split '\s*\|\s*'
+  # $A = $After  -split '\s*\|\s*'
+
+  if ($B.Count -ne $A.Count) {
+    Write-Host "WARN: BEFORE/AFTER khác số phần tử ($($B.Count) vs $($A.Count))." -ForegroundColor Yellow
+  }
+
+  $Bk = Get-OccurrenceKeys $B
+  $Ak = Get-OccurrenceKeys $A
+
+  $posB = @{}; for ($i = 0; $i -lt $Bk.Count; $i++) { $posB[$Bk[$i]] = $i }
+  $posA = @{}; for ($i = 0; $i -lt $Ak.Count; $i++) { $posA[$Ak[$i]] = $i }
+
+  # Các key xuất hiện ở cả 2 bên
+  $all = @()
+  foreach ($k in $posB.Keys) { if ($posA.ContainsKey($k)) { $all += $k } }
+
+  $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+  $found = 0
+
+  foreach ($k in $all) {
+    $i = $posB[$k]
+    $j = $posA[$k]
+    if ($i -eq $j) { continue }
+
+    # Key đang nằm ở vị trí j trong BEFORE (ứng viên đổi chỗ với k)
+    if ($j -ge 0 -and $j -lt $Bk.Count) {
+      $k2 = $Bk[$j]
+      if ($posA.ContainsKey($k2) -and $posA[$k2] -eq $i) {
+        $pairId = if ($i -lt $j) { "$i<$j" } else { "$j<$i" }
+        if ($seen.Add($pairId)) {
+          $found++
+
+          Write-Host ("SWAP positions {0} <-> {1}" -f $i, $j) -ForegroundColor Yellow
+
+          # Write-Host "BEFORE:" -ForegroundColor DarkGray
+          Write-Host ("  - [{0}] {1}" -f $i, $B[$i]) -ForegroundColor Red
+          Write-Host ("  - [{0}] {1}" -f $j, $B[$j]) -ForegroundColor Green
+
+          # Write-Host "AFTER :" -ForegroundColor DarkGray
+          # Write-Host ("  + [{0}] {1}" -f $i, $A[$i]) -ForegroundColor Green
+          # Write-Host ("  + [{0}] {1}" -f $j, $A[$j]) -ForegroundColor Green
+          # Write-Host ""
+        }
+      }
+    }
+  }
+
+  if ($found -eq 0) {
+    Write-Host "Không thấy cặp swap nào (theo nghĩa hoán đổi 2 vị trí bất kỳ, có xét trùng lặp theo occurrence)." -ForegroundColor DarkGray
+  }
+}
+
 if ($PSCmdlet.ParameterSetName -eq "Help") {
   Show-ScriptHelp
   exit 0
@@ -701,7 +801,8 @@ if ($PSCmdlet.ParameterSetName -eq "InstallYafs") {
   try {
     Install-YafsBinaries $YafsPath $YafsSourceDir
     exit 0
-  } catch {
+  }
+  catch {
     Write-Host ("ERROR: " + $_.Exception.Message)
     exit 4
   }
@@ -769,7 +870,8 @@ try {
     if ($ok) {
       Write-Host "OK"
       exit 0
-    } else {
+    }
+    else {
       $msgs | Select-Object -First 50 | ForEach-Object { Write-Host $_ }
       Write-Host "NG"
       exit 1
@@ -777,7 +879,7 @@ try {
   }
 
   if ($Mode -eq "SortOnlyAuto") {
-    [void](Walk-Sort $xml $root $SortScope $FileFilter)
+    [void](Walk-Sort $xml $root "/root" $SortScope $FileFilter)
     Save-Xml $xml $SortedTreeOut
 
     if (-not $Force) {
@@ -799,7 +901,7 @@ try {
     }
 
     # Not sorted -> sort + apply
-    [void](Walk-Sort $xml $root $SortScope $FileFilter)
+    [void](Walk-Sort $xml $root "/root" $SortScope $FileFilter)
     Save-Xml $xml $SortedTreeOut
 
     if (-not $Force) {
@@ -820,7 +922,8 @@ try {
     if ($ok2) {
       Write-Host "SORTED_APPLIED_OK"
       exit 2
-    } else {
+    }
+    else {
       $msgs2 | Select-Object -First 50 | ForEach-Object { Write-Host $_ }
       Write-Host "ERROR_VERIFY_FAIL"
       exit 4

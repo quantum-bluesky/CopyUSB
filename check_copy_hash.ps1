@@ -30,6 +30,8 @@
     [string]$LogFile
 )
 
+Set-StrictMode -Version Latest
+
 # ---------- HÀM LOG ----------
 function Write-Log {
     param(
@@ -172,6 +174,8 @@ foreach ($drv in $DestDrives) {
             $LogFile
         )
 
+        Set-StrictMode -Version Latest
+
         function Write-LogLocal {
             param(
                 [string]$Message,
@@ -205,6 +209,8 @@ foreach ($drv in $DestDrives) {
             MissingParentsAllEmpty    = $true
             MissingParentsAnyHasFiles = $false
         }
+
+        $detailLogLimit = 100
 
         try {
             $srcMap = @{}
@@ -337,12 +343,27 @@ foreach ($drv in $DestDrives) {
 
             if ($onlyInSrc.Count -gt 0) {
                 Write-LogLocal "[$drv]  - Có ở SOURCE nhưng thiếu ở DEST: $($onlyInSrc.Count) file." "WARN"
+                if ($onlyInSrc.Count -lt $detailLogLimit) {
+                    $onlyInSrc | Sort-Object | ForEach-Object {
+                        Write-LogLocal "[$drv]    SOURCE-only: $_" "WARN"
+                    }
+                }
             }
             if ($onlyInDst.Count -gt 0) {
                 Write-LogLocal "[$drv]  - Chỉ có ở DEST (extra): $($onlyInDst.Count) file." "WARN"
+                if ($onlyInDst.Count -lt $detailLogLimit) {
+                    $onlyInDst | Sort-Object | ForEach-Object {
+                        Write-LogLocal "[$drv]    DEST-only: $_" "WARN"
+                    }
+                }
             }
             if ($sizeDiff.Count -gt 0) {
                 Write-LogLocal "[$drv]  - File đường dẫn giống nhưng kích thước khác: $($sizeDiff.Count) file." "WARN"
+                if ($sizeDiff.Count -lt $detailLogLimit) {
+                    $sizeDiff | Sort-Object RelPath | ForEach-Object {
+                        Write-LogLocal ("[$drv]    Size diff: {0} (src={1} dst={2})" -f $_.RelPath, $_.SrcLength, $_.DstLength) "WARN"
+                    }
+                }
             }
         }
 
@@ -442,6 +463,11 @@ foreach ($drv in $DestDrives) {
             Write-LogLocal "[$drv] Hash: tất cả file được kiểm tra đều KHỚP."
         } else {
             Write-LogLocal "[$drv] Hash: phát hiện $($hashMismatch.Count) file KHÔNG KHỚP hash." "ERROR"
+            if ($hashMismatch.Count -lt $detailLogLimit) {
+                $hashMismatch | Sort-Object RelPath | ForEach-Object {
+                    Write-LogLocal ("[$drv]    Hash mismatch: {0} (src={1} dst={2})" -f $_.RelPath, $_.SrcHash, $_.DstHash) "WARN"
+                }
+            }
         }
 
         if ($summary.MissingCount -eq 0 -and
@@ -457,7 +483,7 @@ foreach ($drv in $DestDrives) {
     }
 }
 
-while ($jobs.Count -gt 0) {
+while (@($jobs).Count -gt 0) {
     $finished = Wait-Job -Job $jobs -Any
     $results  = Receive-Job $finished
     $summaries += $results | Where-Object {
@@ -465,7 +491,7 @@ while ($jobs.Count -gt 0) {
         $_.PSObject.Properties.Name -contains 'Drive' -and
         $_.PSObject.Properties.Name -contains 'Status'
     }
-    $jobs = $jobs | Where-Object { $_.Id -ne $finished.Id }
+    $jobs = @($jobs | Where-Object { $_.Id -ne $finished.Id })
     Remove-Job $finished
 }
 
