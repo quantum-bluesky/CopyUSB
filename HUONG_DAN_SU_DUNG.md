@@ -47,10 +47,17 @@ Tất cả script đều chạy từ PowerShell; không có giao diện đồ h�
 1. Gắn các USB cần xử lý và ghi nhận ký tự ổ (ví dụ `F: G: H:`...).
 2. Chạy lệnh:
    ```powershell
-   .\master_copy_check_eject.ps1 -SourceRoot "D:\DuLieuNguon" -DestDrives F:,G:,H: -EnableHash -HashLastN 100 -HashAlgorithm SHA256 -LogDir .\logs
+   .\master_copy_check_eject.ps1 -SourceRoot "D:\DuLieuNguon" -SkipEject
    ```
-3. Xem lại cấu hình được in ra, gõ `Y` để tiếp tục (hoặc thêm `-AutoYes` để bỏ qua xác nhận).
-4. Theo dõi log hiển thị; file log chi tiết được lưu trong thư mục `logs`.
+   - Sẽ tự động Copy + Check tới tất cả các ổ (8 ổ từ F: cho đến M:) 
+   - Khi bỏ -SkipEject sẽ tự động eject Usb khi copy & check xong. 
+   - Khi cần check file kỹ càng (dùng file hash) thêm -EnableHash & -HashLastN 100 (số file hash cuối list) 
+   - Xác định ổ đích thêm -DestDrives (vd: -DestDrives F:,G:,H:) 
+    ```powershell
+   .\master_copy_check_eject.ps1 -SourceRoot "D:\DuLieuNguon" -DestDrives F:,G:,H: -EnableHash -HashLastN 100
+   ```
+4. Xem lại cấu hình được in ra, gõ `Y` để tiếp tục (hoặc thêm `-AutoYes` để bỏ qua xác nhận - khi đó sẽ tự động xóa / format ổ).
+5. Theo dõi log hiển thị; file log chi tiết được lưu trong thư mục `logs`.
 
 **Mẹo/Lưu ý:**
 - Script tự kiểm tra dung lượng, ưu tiên xóa file thừa hoặc quick format FAT32 nếu ổ đủ lớn; ổ >32GB có thể không format FAT32 được trên Windows.
@@ -93,7 +100,10 @@ Tất cả script đều chạy từ PowerShell; không có giao diện đồ h�
 ```powershell
 .\removedrv.ps1
 ```
-
+hoặc 
+```bat
+removedrv.bat
+```
 **Mẹo/Lưu ý:**
 - Trong master script, bước eject diễn ra tự động trừ khi bật `-SkipEject`.
 
@@ -129,14 +139,14 @@ Tất cả script đều chạy từ PowerShell; không có giao diện đồ h�
    .\Mp3FatSort.ps1 -Device 'F:' -Mode CheckAndSort -SortScope Both -FileFilter MediaOnly -Force
    ```
    Tham số `-Force` bỏ qua bước hỏi lại trước khi ghi.
-3. Áp dụng cho nhiều USB song song khi cần nhân bản:
+3. Áp dụng cho nhiều USB giống nhau:
    ```powershell
    .\Mp3FatSort.ps1 -Device 'F:,G:,H:' -Mode CheckAndSort -ThrottleLimit 2
    ```
 
 **Mẹo/Lưu ý:**
-- Nếu thiết bị không chịu phát đúng sau khi sắp xếp, thử copy lại thư viện rồi chạy `Mp3FatSort.ps1` trước khi eject.
-- Khi gặp lỗi “Access is denied” hãy đóng File Explorer/ứng dụng đang mở USB hoặc chạy PowerShell với quyền Administrator.
+- Nếu thiết bị không phát đúng thứ tự list sau khi sắp xếp, ko cần xóa đi copy lại mà chỉ cần chạy `Mp3FatSort.ps1` trước khi eject.
+- Khi chạy `Mp3FatSort.ps1` nếu gặp lỗi “Access is denied” hãy đóng File Explorer/ứng dụng đang mở file trên USB để cho phép sửa thứ tự file (hoặc chạy PowerShell với quyền Administrator).
 - Có thể dùng `-SortScope FilesOnly` nếu chỉ muốn đổi thứ tự file trong cùng thư mục, giữ nguyên thứ tự thư mục chính.
 
 ## Xử lý sự cố (Troubleshooting)
@@ -144,15 +154,15 @@ Tất cả script đều chạy từ PowerShell; không có giao diện đồ h�
 - **Thiếu dung lượng trống:** Master script sẽ bỏ qua ổ không đủ dung lượng. Giảm thư mục nguồn hoặc đổi USB dung lượng lớn hơn.
 - **Không format được FAT32 (>32GB):** Dùng USB nhỏ hơn hoặc format thủ công sang exFAT rồi chạy lại với tùy chọn mirror (`/MIR`) khi cần xóa file thừa.
 - **Bị chặn bởi ExecutionPolicy:** Đã xử lý bằng `Set-ExecutionPolicy -Scope Process Bypass`. Nếu vẫn lỗi, mở PowerShell bằng quyền Administrator và thử lại.
-- **Remount thất bại:** Đảm bảo đã capture cache trước đó; thử `Reset-UsbStorage.ps1` rồi remount lại.
+- **Remount thất bại:** Đảm bảo đã capture cache trước đó; thử `Reset-UsbStorage.ps1` rồi remount lại. (phần này có thể ko có tác dụng vì chưa được test đầy đủ)
 
 ## Câu hỏi thường gặp (FAQ)
 - **Có thể chỉ chạy bước kiểm tra không?** Có. Dùng `check_copy_hash.ps1` độc lập để kiểm tra thư mục đích hiện có.
-- **Muốn giữ nguyên dữ liệu trên USB?** Thêm `-AutoYes` và bỏ `-EnableHash`/`-SkipEject` nếu chỉ muốn copy thêm; master script chỉ xóa/format khi cần giải phóng dung lượng.
+- **Muốn giữ nguyên dữ liệu trên USB?** Thêm `-SkipCleanup` nếu chỉ muốn copy thêm; master script chỉ xóa/format khi cần giải phóng dung lượng.
 - **Có bắt buộc chạy PowerShell 7?** Không, nhưng PowerShell 7+ giúp hiệu năng tốt hơn; script tự phát hiện và ưu tiên nếu có.
 - **Log lưu ở đâu?** Theo mặc định master script tạo file trong thư mục `logs` (ví dụ `copycheckeject_yyyyMMdd_HHmmss.log`). Bạn có thể chỉ định `-LogDir` riêng.
 
 ## Thông tin Liên hệ & Hỗ trợ
-- Email hỗ trợ: `support@example.com`
+- Email hỗ trợ: `quan.nguyenduc@gmail.com`
 - Điện thoại: `+84-000-000-000`
 - Trang chủ/Repo: Vui lòng xem kho chứa CopyUSB nơi bạn tải script.
