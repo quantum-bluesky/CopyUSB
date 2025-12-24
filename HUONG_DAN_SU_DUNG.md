@@ -37,7 +37,14 @@ CopyUSB là công cụ dòng lệnh gồm các script chính:
 - `Reset-UsbStorage.ps1`: Làm mới driver USB Storage khi cần làm sạch trạng thái thiết bị.
 - `Mp3FatSort.ps1`: Kiểm tra và sắp xếp lại thứ tự thư mục/file trên USB định dạng FAT để thiết bị nghe nhạc phát đúng thứ tự mong muốn.
 
-Tất cả script đều chạy từ PowerShell; không có giao diện đồ họa. Các tham số đều hiển thị rõ trong phần cấu hình mỗi khi chạy.
+Hiển thị log màu:
+- **Xám**: thông tin chung.
+- **Vàng**: cảnh báo (ví dụ ổ không phải USB, sắp format, remount...).
+- **Đỏ**: lỗi.
+- **Xanh lục**: thao tác thành công.
+
+
+Tất cả script đều chạy từ PowerShell; không có giao diện đồ họa. Thông số chính được in ra đầu phiên để bạn xác nhận mỗi khi chạy.
 
 ## Hướng dẫn Sử dụng Tính năng
 ### 1. Copy song song nhiều USB và kiểm tra tự động
@@ -63,6 +70,8 @@ Tất cả script đều chạy từ PowerShell; không có giao diện đồ h�
 - Script tự kiểm tra dung lượng, ưu tiên xóa file thừa hoặc quick format FAT32 nếu ổ đủ lớn; ổ >32GB có thể không format FAT32 được trên Windows.
 - Khi phát hiện USB bị rút trong lúc copy, script sẽ thử remount (dựa trên `Remount-Usb.ps1`) rồi copy tiếp.
 - Bỏ qua bước eject bằng `-SkipEject` nếu muốn giữ ổ gắn sau khi copy.
+- Nên bật PowerShell Admin để remount hoạt động.
+- Dùng `-AutoYes` khi đã kiểm thử ổn định để chạy không cần canh prompt (khi đó sẽ tự động xóa / format ổ)
 
 ### 2. Kiểm tra nội dung và hash thư viện MP3
 **Mục đích:** Đối chiếu danh sách file `.mp3` giữa nguồn và nhiều ổ đích; tùy chọn so sánh hash toàn bộ hoặc N file cuối.
@@ -161,8 +170,13 @@ removedrv.bat
 - **Muốn giữ nguyên dữ liệu trên USB?** Thêm `-SkipCleanup` nếu chỉ muốn copy thêm; master script chỉ xóa/format khi cần giải phóng dung lượng.
 - **Có bắt buộc chạy PowerShell 7?** Không, nhưng PowerShell 7+ giúp hiệu năng tốt hơn; script tự phát hiện và ưu tiên nếu có.
 - **Log lưu ở đâu?** Theo mặc định master script tạo file trong thư mục `logs` (ví dụ `copycheckeject_yyyyMMdd_HHmmss.log`). Bạn có thể chỉ định `-LogDir` riêng.
+- **Có bắt buộc hash?** Không. Không bật `-Hash` thì check chỉ so sánh tên/kích thước nên chạy nhanh hơn.
+- **Có thể dừng giữa chừng?** Có. Nhấn `Ctrl+C`; lần chạy sau script sẽ đánh giá lại ổ và copy tiếp nếu cần.
+- **Có hỗ trợ định dạng ngoài mp3?** Logic kiểm tra chỉ nhắm file `.mp3`. Nội dung khác vẫn được copy nhưng không được thống kê/hashing.
 
 ## Thông tin Liên hệ & Hỗ trợ
 - Email hỗ trợ: `quan.nguyenduc@gmail.com`
 - Điện thoại: `+84-000-000-000`
 - Trang chủ/Repo: Vui lòng xem kho chứa CopyUSB nơi bạn tải script.
+- Ref: [https://wordpress.com/quannd](https://quannd.wordpress.com/)
+- Nếu cần trợ giúp nhanh: chạy script với tham số `-Help` (hoặc `-h`) để xem hướng dẫn tích hợp.
