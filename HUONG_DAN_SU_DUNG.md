@@ -35,6 +35,7 @@ CopyUSB là công cụ dòng lệnh gồm các script chính:
 - `Remount-Usb.ps1`: Lưu cache thông tin USB và remount lại ký tự ổ khi bị rút/không còn mount.
 - `removedrv.ps1`: Tháo/eject tất cả USB đã xử lý.
 - `Reset-UsbStorage.ps1`: Làm mới driver USB Storage khi cần làm sạch trạng thái thiết bị.
+- `Mp3FatSort.ps1`: Kiểm tra và sắp xếp lại thứ tự thư mục/file trên USB định dạng FAT để thiết bị nghe nhạc phát đúng thứ tự mong muốn.
 
 Tất cả script đều chạy từ PowerShell; không có giao diện đồ họa. Các tham số đều hiển thị rõ trong phần cấu hình mỗi khi chạy.
 
@@ -106,6 +107,37 @@ Tất cả script đều chạy từ PowerShell; không có giao diện đồ h�
 
 **Mẹo/Lưu ý:**
 - Chạy với quyền Administrator; sau khi reset có thể cần rút cắm lại USB.
+
+### 6. Sắp xếp lại thứ tự phát nhạc trên thiết bị MP3 (FAT)
+**Mục đích:** Một số máy nghe MP3 đọc file theo thứ tự ghi trong bảng FAT thay vì tên file. `Mp3FatSort.ps1` giúp kiểm tra và sắp xếp lại thứ tự này để thiết bị phát đúng playlist mong muốn.
+
+**Chuẩn bị:**
+- Cắm USB cần sắp xếp (định dạng FAT32/exFAT).
+- Bảo đảm thư mục `yafs\bin` đi kèm nằm cùng thư mục script. Lần đầu có thể cài YAFS ra đường dẫn cố định:
+  ```powershell
+  .\Mp3FatSort.ps1 -InstallYafs -YafsPath "C:\\Tools\\yafs\\yafs.exe"
+  ```
+
+**Thực hiện:**
+1. Kiểm tra thứ tự hiện tại (không ghi thay đổi):
+   ```powershell
+   .\Mp3FatSort.ps1 -Device 'F:' -Mode CheckOnly
+   ```
+   Tệp `tree.xml` sẽ được lưu trong thư mục hiện tại để bạn xem thứ tự.
+2. Sắp xếp tự động theo tên thư mục/file (ưu tiên thư mục trước file):
+   ```powershell
+   .\Mp3FatSort.ps1 -Device 'F:' -Mode CheckAndSort -SortScope Both -FileFilter MediaOnly -Force
+   ```
+   Tham số `-Force` bỏ qua bước hỏi lại trước khi ghi.
+3. Áp dụng cho nhiều USB song song khi cần nhân bản:
+   ```powershell
+   .\Mp3FatSort.ps1 -Device 'F:,G:,H:' -Mode CheckAndSort -ThrottleLimit 2
+   ```
+
+**Mẹo/Lưu ý:**
+- Nếu thiết bị không chịu phát đúng sau khi sắp xếp, thử copy lại thư viện rồi chạy `Mp3FatSort.ps1` trước khi eject.
+- Khi gặp lỗi “Access is denied” hãy đóng File Explorer/ứng dụng đang mở USB hoặc chạy PowerShell với quyền Administrator.
+- Có thể dùng `-SortScope FilesOnly` nếu chỉ muốn đổi thứ tự file trong cùng thư mục, giữ nguyên thứ tự thư mục chính.
 
 ## Xử lý sự cố (Troubleshooting)
 - **Không tìm thấy USB hợp lệ / báo Size=0:** Kiểm tra USB đã được nhận dạng trong Windows và có dung lượng thật; thử cắm lại hoặc dùng `Remount-Usb.ps1 -Mode Capture` rồi chạy master script.
