@@ -107,7 +107,7 @@ param(
   [switch]$InstallYafs,
 
   [Parameter(ParameterSetName = "InstallYafs")]
-  [string]$YafsSourceDir = (Join-Path $PSScriptRoot "yafs\bin")
+  [string]$YafsSourceDir = (Join-Path $PSScriptRoot "tools\yafs")
 )
 
 Set-StrictMode -Version Latest
@@ -500,6 +500,8 @@ function Should-SkipNode([xml]$xml, $node) {
   if (Is-DirectoryNode $node) {
     $n = Get-Name $xml $node
     if ($n -ieq "System Volume Information") { return $true }
+    if ($n -ieq ".svn") { return $true }
+    if ($n -ieq ".git") { return $true }
   }
   if (Is-FileNode $node) {
     $n = Get-Name $xml $node
