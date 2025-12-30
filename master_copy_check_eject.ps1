@@ -1,4 +1,4 @@
-﻿param(
+param(
     # Thư mục nguồn cần copy (chứa dữ liệu gốc)
     [string]$SourceRoot = "D:\A Di Da Phat",
 
@@ -7,6 +7,12 @@
 
     # Đường dẫn script CHECK
     [string]$CheckScriptPath = ".\check_copy_hash.ps1",
+    # Đường dẫn script SORT (Mp3FatSort)
+    [string]$SortScriptPath = ".\\Mp3FatSort.ps1",
+
+    # Tự động check & sort sau khi copy - check xong
+    [bool]$CheckAndSort = $true,
+
 
     # Tham số cho bước CHECK
     [switch]$EnableHash,       # bật check hash
@@ -34,6 +40,7 @@
 # Ghi nhan trang thai tham so/duong dan truoc khi chuan hoa
 $script:SkipEjectEffective = $SkipEject
 $script:CheckPathIsEmpty = [string]::IsNullOrWhiteSpace($CheckScriptPath)
+$script:SortScriptIsEmpty = [string]::IsNullOrWhiteSpace($SortScriptPath)
 $script:EjectPathIsEmpty = [string]::IsNullOrWhiteSpace($EjectScriptPath)
 $script:RemountScriptIsEmpty = [string]::IsNullOrWhiteSpace($RemountScriptPath)
 $script:RemountCacheIsEmpty  = [string]::IsNullOrWhiteSpace($RemountCachePath)
@@ -48,6 +55,9 @@ $ScriptDir = if ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { (G
 # Chuẩn hoá đường dẫn tương đối thành tuyệt đối (dựa trên thư mục script)
 if (-not $script:CheckPathIsEmpty -and -not [System.IO.Path]::IsPathRooted($CheckScriptPath)) {
     $CheckScriptPath = Join-Path $ScriptDir $CheckScriptPath
+}
+if (-not $script:SortScriptIsEmpty -and -not [System.IO.Path]::IsPathRooted($SortScriptPath)) {
+    $SortScriptPath = Join-Path $ScriptDir $SortScriptPath
 }
 if (-not $script:SkipEjectEffective -and -not $script:EjectPathIsEmpty -and -not [System.IO.Path]::IsPathRooted($EjectScriptPath)) {
     $EjectScriptPath = Join-Path $ScriptDir $EjectScriptPath
@@ -200,9 +210,24 @@ if ($script:CheckPathIsEmpty) {
     Write-Log "CheckScriptPath rỗng. Vui lòng chỉ định đường dẫn hợp lệ." "ERROR"
     exit 1
 }
+
 if (-not (Test-Path $CheckScriptPath)) {
     Write-Log "Script CHECK không tồn tại: $CheckScriptPath" "ERROR"
     exit 1
+}
+
+# Validate script SORT
+if ($CheckAndSort) {
+    if ($script:SortScriptIsEmpty) {
+        Write-Log "SortScriptPath rỗng. Vui lòng chỉ định đường dẫn hợp lệ." "ERROR"
+        exit 1
+    }
+    if (-not (Test-Path $SortScriptPath)) {
+        Write-Log "Script SORT không tồn tại: $SortScriptPath" "ERROR"
+        exit 1
+    }
+} else {
+    Write-Log "Bỏ qua bước SORT (CheckAndSort = false)." "WARN"
 }
 
 # X? ly SkipEject va validate script EJECT
@@ -235,6 +260,8 @@ Write-Host "===== CẤU HÌNH HIỆN TẠI =====" -ForegroundColor Cyan
 Write-Host "SourceRoot      : $SourceRoot"
 Write-Host "DestDrives      : $($DestDrives -join ', ')"
 Write-Host "CheckScriptPath : $CheckScriptPath"
+Write-Host "SortScriptPath  : $SortScriptPath"
+Write-Host "CheckAndSort    : $CheckAndSort"
 Write-Host "EjectScriptPath : $EjectScriptPath"
 Write-Host "RemountScript   : $RemountScriptPath"
 Write-Host "RemountCache    : $RemountCachePath"
@@ -660,9 +687,115 @@ function Start-CopyProcess {
     }
 }
 
+function Invoke-PostCopyFlow {
+    param(
+        [string]$DriveLetter
+    )
+
+    $result = [PSCustomObject]@{
+        Drive   = $DriveLetter
+        Success = $true
+        Stage   = ""
+        Code    = 0
+    }
+
+    if (-not (Test-Path $CheckScriptPath)) {
+        Write-Log ("Không tìm thấy script CHECK: {0}. Dừng flow ở {1}." -f $CheckScriptPath, $DriveLetter) "ERROR"
+        $result.Success = $false
+        $result.Stage = "CHECK"
+        $result.Code = 1
+        return $result
+    }
+
+    Write-Log ("BẮT ĐẦU BƯỚC CHECK cho ổ {0}..." -f $DriveLetter)
+    $checkScriptFull = [System.IO.Path]::GetFullPath($CheckScriptPath)
+    $checkArgs = @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", $checkScriptFull,
+        "-SourceRoot", $SourceRoot,
+        "-DestDrives", $DriveLetter,
+        "-NoConfirm",
+        "-NoPause",
+        "-LogFile", $LogFile,
+        "-HashLastN", $HashLastN,
+        "-HashAlgorithm", $HashAlgorithm
+    )
+    if ($EnableHash) { $checkArgs += "-Hash" }
+    Write-Log ("CMD CHECK ({0}): {1} {2}" -f $DriveLetter, $script:ShellExe, ($checkArgs -join " "))
+    & $script:ShellExe @checkArgs
+    $checkCode = $LASTEXITCODE
+    if ($checkCode -ne 0) {
+        Write-Log ("BƯỚC CHECK lỗi cho ổ {0} (ExitCode={1}). Dừng flow ở ổ này." -f $DriveLetter, $checkCode) "ERROR"
+        $result.Success = $false
+        $result.Stage = "CHECK"
+        $result.Code = $checkCode
+        return $result
+    }
+    Write-Log ("BƯỚC CHECK hoàn tất cho ổ {0}." -f $DriveLetter)
+
+    if ($CheckAndSort) {
+        if (-not (Test-Path $SortScriptPath)) {
+            Write-Log ("Không tìm thấy script SORT: {0}. Dừng flow ở {1}." -f $SortScriptPath, $DriveLetter) "ERROR"
+            $result.Success = $false
+            $result.Stage = "SORT"
+            $result.Code = 1
+            return $result
+        }
+
+        Write-Log ("BẮT ĐẦU BƯỚC SORT cho ổ {0}..." -f $DriveLetter)
+        $sortScriptFull = [System.IO.Path]::GetFullPath($SortScriptPath)
+        $deviceArg = $DriveLetter.ToLower()
+        $sortArgs = @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", $sortScriptFull,
+            "-Device", $deviceArg,
+            "-Mode", "CheckAndSort"
+        )
+        Write-Log ("CMD SORT ({0}): {1} {2}" -f $DriveLetter, $script:ShellExe, ($sortArgs -join " "))
+        & $script:ShellExe @sortArgs
+        $sortCode = $LASTEXITCODE
+        if ($sortCode -ne 0) {
+            Write-Log ("BƯỚC SORT lỗi cho ổ {0} (ExitCode={1}). Dừng flow ở ổ này." -f $DriveLetter, $sortCode) "ERROR"
+            $result.Success = $false
+            $result.Stage = "SORT"
+            $result.Code = $sortCode
+            return $result
+        }
+        Write-Log ("BƯỚC SORT hoàn tất cho ổ {0}." -f $DriveLetter)
+    }
+
+    if ($script:SkipEjectEffective) {
+        Write-Log ("Bỏ qua bước EJECT cho ổ {0} (SkipEject)." -f $DriveLetter) "WARN"
+        return $result
+    }
+    if (-not (Test-Path $EjectScriptPath)) {
+        Write-Log ("Không tìm thấy script EJECT: {0}. Bỏ qua EJECT cho ổ {1}." -f $EjectScriptPath, $DriveLetter) "WARN"
+        return $result
+    }
+
+    Write-Log ("BẮT ĐẦU BƯỚC EJECT cho ổ {0}..." -f $DriveLetter)
+    $ejectScriptFull = [System.IO.Path]::GetFullPath($EjectScriptPath)
+    $drvArg = $DriveLetter.ToLower()
+    $argListEject = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $ejectScriptFull, $drvArg)
+    Write-Log ("CMD EJECT ({0}): {1} {2}" -f $DriveLetter, $script:ShellExe, ($argListEject -join " "))
+    & $script:ShellExe @argListEject
+    $ejectCode = $LASTEXITCODE
+    if ($ejectCode -ne 0) {
+        Write-Log ("BƯỚC EJECT lỗi cho ổ {0} (ExitCode={1})." -f $DriveLetter, $ejectCode) "ERROR"
+        $result.Success = $false
+        $result.Stage = "EJECT"
+        $result.Code = $ejectCode
+        return $result
+    }
+    Write-Log ("BƯỚC EJECT hoàn tất cho ổ {0}." -f $DriveLetter)
+
+    return $result
+}
+
 Write-Log "BẮT ĐẦU BƯỚC COPY (robocopy)..."
 
 $copyResults = @{}
+$flowErrors = @{}
 $active = @()
 $threadNo = [int][Math]::Floor(16 / $PreparedTargets.Count)
 if ($threadNo -lt 1) { $threadNo = 1 }
@@ -676,6 +809,12 @@ foreach ($drv in $PreparedTargets) {
         $active += $procObj
     } else {
         $copyResults[$drv] = 999
+        $flowErrors[$drv] = [PSCustomObject]@{
+            Drive   = $drv
+            Success = $false
+            Stage   = "COPY"
+            Code    = 999
+        }
     }
     Start-Sleep -Milliseconds 300
 }
@@ -700,12 +839,22 @@ while ($active.Count -gt 0) {
 
         if ($code -lt 8) {
             Write-Log ("COPY toi {0} HOAN TAT. ExitCode={1}" -f $drv, $code)
+            $flowResult = Invoke-PostCopyFlow -DriveLetter $drv
+            if (-not $flowResult.Success) {
+                $flowErrors[$drv] = $flowResult
+            }
             continue
         }
 
         Write-Log ("COPY toi {0} THAT BAI. ExitCode={1}" -f $drv, $code) "ERROR"
         if ($AutoYes) {
             Write-Log "AutoYes đang bật -> không thử lại copy cho ổ này." "ERROR"
+            $flowErrors[$drv] = [PSCustomObject]@{
+                Drive   = $drv
+                Success = $false
+                Stage   = "COPY"
+                Code    = $code
+            }
             continue
         }
 
@@ -730,6 +879,12 @@ while ($active.Count -gt 0) {
         if ($ans -and $ans.ToUpper() -eq 'Y') {
             if (-not (Wait-DriveReady $drv 60)) {
                 Write-Log ("Ổ {0} vẫn không sẵn sàng sau 60s. Bỏ qua ổ này." -f $drv) "ERROR"
+                $flowErrors[$drv] = [PSCustomObject]@{
+                    Drive   = $drv
+                    Success = $false
+                    Stage   = "COPY"
+                    Code    = $code
+                }
                 continue
             }
             Write-Log ("Thử copy lại ổ {0}..." -f $drv)
@@ -739,70 +894,40 @@ while ($active.Count -gt 0) {
                 $active += $retryProc
             } else {
                 Write-Log ("Khởi động copy lại ổ {0} thất bại, giữ nguyên lỗi trước đó." -f $drv) "ERROR"
+                $flowErrors[$drv] = [PSCustomObject]@{
+                    Drive   = $drv
+                    Success = $false
+                    Stage   = "COPY"
+                    Code    = $code
+                }
             }
         }
         else {
             Write-Log ("Người dùng chọn bỏ qua copy cho ổ {0}." -f $drv) "WARN"
+            $flowErrors[$drv] = [PSCustomObject]@{
+                Drive   = $drv
+                Success = $false
+                Stage   = "COPY"
+                Code    = $code
+            }
         }
     }
 }
 
-if ($copyResults.Values | Where-Object { $_ -ge 8 }) {
-    Write-Log "Một hoặc nhiều ổ copy lỗi. DỪNG quy trình, KHÔNG thực hiện CHECK và EJECT." "ERROR"
-    exit 1
-}
-
-Write-Log "Tất cả copy robocopy hoàn tất (không lỗi mức >=8)."
-# ================== BƯỚC 3: CHECK ==================
-if (-not (Test-Path $CheckScriptPath)) {
-    Write-Log "Không tìm thấy script CHECK: $CheckScriptPath. Bỏ qua bước CHECK." "WARN"
-}
-else {
-    Write-Log "BẮT ĐẦU BƯỚC CHECK bằng script: $CheckScriptPath"
-
-    $checkScriptFull = [System.IO.Path]::GetFullPath($CheckScriptPath)
-    $checkArgs = @(
-        "-NoProfile", "-ExecutionPolicy", "Bypass",
-        "-File", $checkScriptFull,
-        "-SourceRoot", $SourceRoot,
-        "-DestDrives"
-    ) + @($PreparedTargets) -join "," + @(
-        "-NoConfirm",
-        "-NoPause",
-        "-LogFile", $LogFile,
-        "-HashLastN", $HashLastN,
-        "-HashAlgorithm", $HashAlgorithm
-    )
-    Write-Log ("CMD CHECK: {0} {1}" -f $script:ShellExe, ($checkArgs -join ' '))
-    & $script:ShellExe @checkArgs
-    $checkCode = $LASTEXITCODE
-    if ($checkCode -ne 0) {
-        Write-Log ("BƯỚC CHECK báo lỗi (ExitCode={0}). DỪNG, KHÔNG EJECT." -f $checkCode) "ERROR"
-        exit 1
-    } else {
-        Write-Log "BƯỚC CHECK hoàn tất."
+$overallExitCode = 0
+Write-Log "Đã hoàn tất theo dõi copy và xử lý theo từng ổ."
+if ($flowErrors.Count -gt 0) {
+    Write-Log "Một hoặc nhiều ổ gặp lỗi trong quá trình xử lý." "ERROR"
+    foreach ($k in $flowErrors.Keys) {
+        $e = $flowErrors[$k]
+        Write-Log (" - {0}: Lỗi {1} (ExitCode={2})" -f $k, $e.Stage, $e.Code) "ERROR"
     }
-}
-    
-if ($script:SkipEjectEffective) {
-    Write-Log "Bỏ qua bước EJECT theo cấu hình." "WARN"
-} elseif (-not (Test-Path $EjectScriptPath)) {
-    Write-Log "Không tìm thấy script EJECT: $EjectScriptPath. Bỏ qua bước EJECT." "WARN"
+    $overallExitCode = 1
 } else {
-    Write-Log "BẮT ĐẦU BƯỚC EJECT với script: $EjectScriptPath"
-    $drvArgs = $PreparedTargets | ForEach-Object { $_.ToLower() }
-    $ejectScriptFull = [System.IO.Path]::GetFullPath($EjectScriptPath)
-    $argListEject = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $ejectScriptFull) + $drvArgs
-    Write-Log ("CMD EJECT: {0} {1}" -f $script:ShellExe, ($argListEject -join ' ' ))
-    & $script:ShellExe @argListEject
-    $ejectCode = $LASTEXITCODE
-    if ($ejectCode -ne 0) {
-        Write-Log ("Bước EJECT có lỗi (ExitCode={0})." -f $ejectCode) "ERROR"
-    } else {
-        Write-Log "Bước EJECT hoàn tất."
-    }
+    Write-Log "Tất cả các ổ đã hoàn tất đầy đủ các bước."
 }
 
 Write-Log "===== QUY TRÌNH HOÀN THÀNH ====="
 Write-Host ""
 Write-Host "Log file: $LogFile" -ForegroundColor Cyan
+if ($overallExitCode -ne 0) { exit $overallExitCode }
