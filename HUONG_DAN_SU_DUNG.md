@@ -132,7 +132,7 @@ removedrv.bat
 
 **Chuẩn bị:**
 - Cắm USB cần sắp xếp (định dạng FAT32/exFAT).
-- Bảo đảm thư mục `yafs\bin` đi kèm nằm cùng thư mục script. Lần đầu có thể cài YAFS ra đường dẫn cố định:
+- Bảo đảm thư mục `tools\yafs\` đi kèm nằm cùng thư mục script. Lần đầu có thể cài YAFS ra đường dẫn cố định:
   ```powershell
   .\Mp3FatSort.ps1 -InstallYafs -YafsPath "C:\\Tools\\yafs\\yafs.exe"
   ```
@@ -147,7 +147,7 @@ removedrv.bat
    ```powershell
    .\Mp3FatSort.ps1 -Device 'F:' -Mode CheckAndSort -SortScope Both -FileFilter MediaOnly -Force
    ```
-   Tham số `-Force` bỏ qua bước hỏi lại trước khi ghi.
+   Tham số `-Force` để chạy song song nhiều ổ cùng lúc & bỏ qua bước confirm (hỏi lại) trước khi ghi.
 3. Áp dụng cho nhiều USB giống nhau:
    ```powershell
    .\Mp3FatSort.ps1 -Device 'F:,G:,H:' -Mode CheckAndSort -ThrottleLimit 2

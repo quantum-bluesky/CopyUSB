@@ -1,4 +1,4 @@
-param(
+﻿param(
     # Thư mục nguồn cần copy (chứa dữ liệu gốc)
     [string]$SourceRoot = "D:\A Di Da Phat",
 
@@ -766,7 +766,7 @@ else {
         "-File", $checkScriptFull,
         "-SourceRoot", $SourceRoot,
         "-DestDrives"
-    ) + @($PreparedTargets) + @(
+    ) + @($PreparedTargets) -join "," + @(
         "-NoConfirm",
         "-NoPause",
         "-LogFile", $LogFile,
