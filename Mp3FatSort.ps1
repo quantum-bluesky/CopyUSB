@@ -112,7 +112,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-chcp 65001 | Out-Null  # UTF-8
+# chcp 65001 | Out-Null  # UTF-8
 function Write-Log([string]$msg) {
   if ($VerboseLog) { Write-Host $msg }
 }

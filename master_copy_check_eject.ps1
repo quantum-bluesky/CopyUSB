@@ -8,7 +8,7 @@ param(
     # Đường dẫn script CHECK
     [string]$CheckScriptPath = ".\check_copy_hash.ps1",
     # Đường dẫn script SORT (Mp3FatSort)
-    [string]$SortScriptPath = ".\\Mp3FatSort.ps1",
+    [string]$SortScriptPath = ".\Mp3FatSort.ps1",
 
     # Tự động check & sort sau khi copy - check xong
     [bool]$CheckAndSort = $true,
@@ -36,7 +36,55 @@ param(
 
     # Bo qua buoc Eject
     [switch]$SkipEject
-)    
+)
+
+# Chạy với quyền Administrator
+# Kiểm tra quyền admin
+$windowsIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$windowsPrincipal = New-Object Security.Principal.WindowsPrincipal($windowsIdentity)
+$adminRole = [Security.Principal.WindowsBuiltinRole]::Administrator
+
+if (-not $windowsPrincipal.IsInRole($adminRole)) {
+    Write-Host "Script không có quyền admin. Đang khởi động lại với quyền admin..." -ForegroundColor Yellow
+    Pause
+    # Tạo lệnh chạy lại script với tất cả tham số
+    $scriptPath = $MyInvocation.MyCommand.Path
+    $args = $MyInvocation.BoundParameters.Values | ForEach-Object { 
+        if ($_ -is [switch]) {
+            "-$($MyInvocation.BoundParameters.Keys | Where-Object { $MyInvocation.BoundParameters[$_] -eq $_ })"
+        }
+        else {
+            "-$key `"$_`""
+        }
+    }
+    
+    # Nếu script được gọi từ Command Line, khôi phục các tham số
+    $allArgs = @()
+    foreach ($param in $PSBoundParameters.Keys) {
+        $value = $PSBoundParameters[$param]
+        if ($value -is [switch]) {
+            if ($value) { $allArgs += "-$param" }
+        }
+        else {
+            $allArgs += "-$param"
+            $allArgs += """$value"""
+        }
+    }
+    
+    $argString = if ($allArgs.Count -gt 0) { $allArgs -join ' ' } else { '' }
+    if (Get-Command pwsh.exe -ErrorAction SilentlyContinue) {
+        # Nếu có PowerShell 7+, dùng pwsh
+        Start-Process pwsh.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" $argString" -Verb RunAs
+    }
+    else {
+        # Dùng PowerShell 5.1 mặc định
+        Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" $argString" -Verb RunAs
+    }
+	pause
+    exit
+}
+
+
 # Ghi nhan trang thai tham so/duong dan truoc khi chuan hoa
 $script:SkipEjectEffective = $SkipEject
 $script:CheckPathIsEmpty = [string]::IsNullOrWhiteSpace($CheckScriptPath)
@@ -930,4 +978,7 @@ if ($flowErrors.Count -gt 0) {
 Write-Log "===== QUY TRÌNH HOÀN THÀNH ====="
 Write-Host ""
 Write-Host "Log file: $LogFile" -ForegroundColor Cyan
-if ($overallExitCode -ne 0) { exit $overallExitCode }
+if ($overallExitCode -ne 0) {
+	pause 
+	exit $overallExitCode
+	}
