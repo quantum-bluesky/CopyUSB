@@ -1466,7 +1466,26 @@ if ($threadNo -gt 8) { $threadNo = 8 }
 # Khởi động copy cho tất cả ổ (song song)
 foreach ($drv in $PreparedTargets) {
     $useMirror = $MirrorTargets -contains $drv
-    $procObj = Start-CopyProcess -DriveLetter $drv -UseMirror $useMirror -ThreadNo $threadNo
+    $threadNoForDrive = $threadNo
+    $sizeGB = $null
+    if ($usbMap.ContainsKey($drv)) {
+        $sizeGB = [double]($usbMap[$drv].Size / 1GB)
+        if ($sizeGB -le 2.0) {
+            $threadNoForDrive = [Math]::Min($threadNoForDrive, 2)
+        }
+        elseif ($sizeGB -le 4.0) {
+            $threadNoForDrive = [Math]::Min($threadNoForDrive, 4)
+        }
+    }
+    if ($threadNoForDrive -lt 1) { $threadNoForDrive = 1 }
+    if ($threadNoForDrive -ne $threadNo) {
+        if ($null -ne $sizeGB) {
+            Write-Log ("Thread limit for {0}: {1} (size ~{2:N2}GB)." -f $drv, $threadNoForDrive, $sizeGB) -Drive $drv
+        } else {
+            Write-Log ("Thread limit for {0}: {1}." -f $drv, $threadNoForDrive) -Drive $drv
+        }
+    }
+    $procObj = Start-CopyProcess -DriveLetter $drv -UseMirror $useMirror -ThreadNo $threadNoForDrive
     if ($procObj) {
         $active += $procObj
     }
