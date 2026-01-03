@@ -13,8 +13,8 @@
     [int]$HashLastN = 0,
 
     # Thuật toán hash
-    [ValidateSet('MD5','SHA256')]
-    [string]$HashAlgorithm = 'MD5',
+    [ValidateSet('CRC32','MD5','SHA256')]
+    [string]$HashAlgorithm = 'CRC32',
 
     # Hiển thị hướng dẫn
     [switch]$h,
@@ -70,7 +70,7 @@ function Show-Help {
     Write-Host "  -HashLastN  <N>          : Khi có -Hash:"
     Write-Host "                             =0  → hash toàn bộ file chung."
     Write-Host "                             >0  → chỉ hash N file cuối cùng."
-    Write-Host "  -HashAlgorithm MD5|SHA256: Thuật toán hash (mặc định MD5)."
+    Write-Host "  -HashAlgorithm CRC32|MD5|SHA256: Thu?t toan hash (m?c ??nh CRC32)."
     Write-Host "  -NoConfirm               : Không hỏi lại cấu hình."
     Write-Host "  -NoPause                 : Không chờ Enter cuối script."
     Write-Host "  -LogFile     <path>      : Ghi log vào file chỉ định."
@@ -194,6 +194,49 @@ foreach ($drv in $DestDrives) {
             if ($LogFile) {
                 Add-Content -Path $LogFile -Value $line -Encoding utf8
             }
+        }
+
+        function Get-Crc32Table {
+            $table = New-Object 'uint32[]' 256
+            for ($i = 0; $i -lt 256; $i++) {
+                $crc = [uint32]$i
+                for ($j = 0; $j -lt 8; $j++) {
+                    if (($crc -band 1) -ne 0) {
+                        $crc = [uint32]0xEDB88320 -bxor ($crc -shr 1)
+                    } else {
+                        $crc = $crc -shr 1
+                    }
+                }
+                $table[$i] = $crc
+            }
+            return $table
+        }
+
+        function Get-FileCrc32 {
+            param([string]$Path)
+
+            if (-not $script:Crc32Table) {
+                $script:Crc32Table = Get-Crc32Table
+            }
+
+            $crc = [uint32]0xFFFFFFFF
+            $fs = [System.IO.File]::OpenRead($Path)
+            try {
+                $buffer = New-Object byte[] 8192
+                while (($read = $fs.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                    for ($i = 0; $i -lt $read; $i++) {
+                        $idx = ($crc -bxor $buffer[$i]) -band 0xFF
+                        $crc = $script:Crc32Table[$idx] -bxor ($crc -shr 8)
+                    }
+                }
+            }
+            finally {
+                $fs.Dispose()
+            }
+
+            $crc = -bnot $crc
+            $crc = $crc -band 0xFFFFFFFF
+            return $crc.ToString("X8")
         }
 
         $summary = [PSCustomObject]@{
@@ -431,10 +474,18 @@ foreach ($drv in $DestDrives) {
 
             try {
                 if (-not $srcHashCache.ContainsKey($item.Src)) {
-                    $srcHashCache[$item.Src] = (Get-FileHash -Path $item.Src -Algorithm $HashAlgorithm).Hash
+                    if ($HashAlgorithm -eq 'CRC32') {
+                        $srcHashCache[$item.Src] = Get-FileCrc32 -Path $item.Src
+                    } else {
+                        $srcHashCache[$item.Src] = (Get-FileHash -Path $item.Src -Algorithm $HashAlgorithm).Hash
+                    }
                 }
                 $srcHash = $srcHashCache[$item.Src]
-                $dstHash = (Get-FileHash -Path $item.Dst -Algorithm $HashAlgorithm).Hash
+                if ($HashAlgorithm -eq 'CRC32') {
+                    $dstHash = Get-FileCrc32 -Path $item.Dst
+                } else {
+                    $dstHash = (Get-FileHash -Path $item.Dst -Algorithm $HashAlgorithm).Hash
+                }
             }
             catch {
                 Write-LogLocal "[$drv] Lỗi hash file: $rel - $_" "ERROR"
