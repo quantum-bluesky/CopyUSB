@@ -1,4 +1,4 @@
-param(
+﻿param(
     # Thư mục nguồn cần copy (chứa dữ liệu gốc)
     [ValidateNotNullOrEmpty()]
     [string]$SourceRoot = "D:\A Di Da Phat",
@@ -47,6 +47,17 @@ Set-StrictMode -Version Latest
 $script:DriveLogFiles = @{}
 $script:DriveLogStates = @{}
 $script:EarlyCopyErrors = @{}
+$script:CopySpeedStates = @{}
+$script:CopyAbortReasons = @{}
+$script:StartCopyErrors = @{}
+
+$PreparedTargets = @()
+$MirrorTargets = @()
+
+$script:WriteTestMinBytes = 4096
+$script:WriteTestMaxBytes = 16384
+$script:CopyNoProgressSec = 90
+$script:CopyNoProgressDeltaBytes = 4096
 
 # Chạy với quyền Administrator
 # Kiểm tra quyền admin
@@ -258,7 +269,7 @@ function Get-RobocopyErrorFromLines {
         $line = $Lines[$i]
         if (-not $line) { continue }
         $line = $line.Trim()
-        if ($line -match '^ERROR\s+(\d+)\s+\((0x[0-9A-Fa-f]+)\)\s+(.*)$') {
+        if ($line -match '^(?:\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}\s+)?ERROR\s+(\d+)\s+\((0x[0-9A-Fa-f]+)\)\s+(.*)$') {
             $code = [int]$matches[1]
             $action = $matches[3].Trim()
             $detail = $null
@@ -279,7 +290,7 @@ function Get-RobocopyErrorFromLines {
                 Raw          = $line
             }
         }
-        if ($line -match '^ERROR:\s*(.+)$') {
+        if ($line -match '^(?:\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}\s+)?ERROR:\s*(.+)$') {
             return [PSCustomObject]@{
                 Win32Code    = $null
                 Win32Message = $null
@@ -460,6 +471,346 @@ function Try-RemountDrive {
     Write-Log ("Remount ổ {0} thất bại (ExitCode={1})." -f $DriveLetter, $code) "WARN" -Drive $DriveLetter
     return $false
 }
+
+function Get-BytesMd5 {
+    param(
+        [ValidateNotNull()]
+        [byte[]]$Bytes
+    )
+
+    $md5 = [System.Security.Cryptography.MD5]::Create()
+    try {
+        $hashBytes = $md5.ComputeHash($Bytes)
+    }
+    finally {
+        $md5.Dispose()
+    }
+
+    return ([System.BitConverter]::ToString($hashBytes)).Replace("-", "")
+}
+
+function Test-DriveWriteSmallFile {
+    param(
+        [ValidateNotNullOrEmpty()]
+        [string]$DriveLetter,
+        [ValidateRange(1024, 1048576)]
+        [int]$MinBytes = 4096,
+        [ValidateRange(1024, 1048576)]
+        [int]$MaxBytes = 16384
+    )
+
+    $result = [PSCustomObject]@{
+        Success   = $false
+        Message   = ""
+        SizeBytes = 0
+    }
+
+    if ($MinBytes -gt $MaxBytes) {
+        $result.Message = "MinBytes > MaxBytes."
+        return $result
+    }
+
+    $root = ($DriveLetter.TrimEnd(':') + ":\\")
+    if (-not (Test-Path -LiteralPath $root)) {
+        $result.Message = "Drive not ready."
+        return $result
+    }
+
+    $size = Get-Random -Minimum $MinBytes -Maximum ($MaxBytes + 1)
+    $bytes = New-Object byte[] $size
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $rng.GetBytes($bytes)
+    }
+    finally {
+        $rng.Dispose()
+    }
+
+    $hash1 = Get-BytesMd5 -Bytes $bytes
+    $tmpName = ".__copyusb_write_test_{0}.tmp" -f ([guid]::NewGuid().ToString("N"))
+    $tmpPath = Join-Path $root $tmpName
+
+    try {
+        $fs = [System.IO.File]::Open($tmpPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        try {
+            $fs.Write($bytes, 0, $bytes.Length)
+            try { $fs.Flush($true) } catch { $fs.Flush() }
+        }
+        finally {
+            $fs.Dispose()
+        }
+
+        $readBytes = [System.IO.File]::ReadAllBytes($tmpPath)
+        if ($readBytes.Length -ne $bytes.Length) {
+            $result.Message = "Read size mismatch."
+            return $result
+        }
+
+        $hash2 = Get-BytesMd5 -Bytes $readBytes
+        if ($hash1 -ne $hash2) {
+            $result.Message = "Checksum mismatch."
+            return $result
+        }
+
+        $result.Success = $true
+        $result.SizeBytes = $size
+        return $result
+    }
+    catch {
+        $result.Message = $_.Exception.Message
+        return $result
+    }
+    finally {
+        if ($tmpPath -and (Test-Path -LiteralPath $tmpPath)) {
+            try { Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue } catch { }
+        }
+    }
+}
+
+function Get-DriveFreeBytes {
+    param(
+        [ValidateNotNullOrEmpty()]
+        [string]$DriveLetter
+    )
+
+    $name = $DriveLetter.Trim().TrimEnd(':')
+    if ([string]::IsNullOrWhiteSpace($name)) { return $null }
+    try {
+        $drive = Get-PSDrive -Name $name -ErrorAction Stop
+        return [int64]$drive.Free
+    }
+    catch {
+        return $null
+    }
+}
+
+function Reset-CopySpeedState {
+    param(
+        [ValidateNotNullOrEmpty()]
+        [string]$DriveLetter
+    )
+
+    $key = Get-DriveKey $DriveLetter
+    if (-not $key) { return }
+    $script:CopySpeedStates[$key] = [PSCustomObject]@{
+        LastFreeBytes = $null
+        LastChange    = Get-Date
+        NoProgress    = $false
+    }
+}
+
+function Test-CopyNoProgress {
+    param(
+        [ValidateNotNullOrEmpty()]
+        [string]$DriveLetter,
+        [ValidateRange(10, 600)]
+        [int]$NoProgressSec = $script:CopyNoProgressSec,
+        [ValidateRange(1024, 1048576)]
+        [long]$MinDeltaBytes = $script:CopyNoProgressDeltaBytes
+    )
+
+    $key = Get-DriveKey $DriveLetter
+    if (-not $key) { return $null }
+
+    if (-not $script:CopySpeedStates.ContainsKey($key)) {
+        Reset-CopySpeedState -DriveLetter $DriveLetter
+    }
+
+    $state = $script:CopySpeedStates[$key]
+    if ($state.NoProgress) { return $null }
+
+    $freeBytes = Get-DriveFreeBytes -DriveLetter $DriveLetter
+    if ($null -eq $freeBytes) { return $null }
+
+    if ($null -eq $state.LastFreeBytes) {
+        $state.LastFreeBytes = $freeBytes
+        $state.LastChange = Get-Date
+        return $null
+    }
+
+    $delta = $state.LastFreeBytes - $freeBytes
+    if ([Math]::Abs($delta) -ge $MinDeltaBytes) {
+        $state.LastFreeBytes = $freeBytes
+        $state.LastChange = Get-Date
+        return $null
+    }
+
+    $elapsed = (Get-Date) - $state.LastChange
+    if ($elapsed.TotalSeconds -ge $NoProgressSec) {
+        $state.NoProgress = $true
+        return [PSCustomObject]@{
+            NoProgressSec = [int][Math]::Floor($elapsed.TotalSeconds)
+            FreeBytes     = $freeBytes
+        }
+    }
+
+    return $null
+}
+
+function Get-FileHashHex {
+    param(
+        [ValidateNotNullOrEmpty()]
+        [string]$Path,
+        [ValidateNotNullOrEmpty()]
+        [string]$Algorithm,
+        [string]$Drive
+    )
+
+    $algoName = $Algorithm.ToUpperInvariant()
+    if ($algoName -ne "MD5" -and $algoName -ne "SHA256") {
+        $algoName = "MD5"
+        if ($Drive) {
+            Write-Log ("[RESUME] HashAlgorithm {0} not supported, fallback to MD5." -f $Algorithm) "WARN" -Drive $Drive
+        } else {
+            Write-Log ("[RESUME] HashAlgorithm {0} not supported, fallback to MD5." -f $Algorithm) "WARN"
+        }
+    }
+
+    $algo = if ($algoName -eq "SHA256") { [System.Security.Cryptography.SHA256]::Create() } else { [System.Security.Cryptography.MD5]::Create() }
+    try {
+        $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        try {
+            $hashBytes = $algo.ComputeHash($fs)
+        }
+        finally {
+            $fs.Dispose()
+        }
+    }
+    finally {
+        $algo.Dispose()
+    }
+
+    return ([System.BitConverter]::ToString($hashBytes)).Replace("-", "")
+}
+
+function Get-Mp3ListSimple {
+    param(
+        [ValidateNotNullOrEmpty()]
+        [string]$Root
+    )
+
+    if (-not (Test-Path -LiteralPath $Root)) { return @() }
+
+    $rootFull = (Resolve-Path $Root).ProviderPath
+    $params = @{
+        Path    = $rootFull
+        Filter  = '*.mp3'
+        Recurse = $true
+        File    = $true
+        Force   = $true
+    }
+
+    $gciCmd = Get-Command Get-ChildItem
+    if ($gciCmd.Parameters.ContainsKey('FollowSymlink')) {
+        $params['FollowSymlink'] = $true
+    }
+
+    Get-ChildItem @params | ForEach-Object {
+        $rel = $_.FullName.Substring($rootFull.Length).TrimStart('\')
+        [PSCustomObject]@{
+            FullName = $_.FullName
+            RelPath  = $rel
+            Length   = $_.Length
+        }
+    }
+}
+
+function Invoke-PreFormatResumeCheck {
+    param(
+        [ValidateNotNullOrEmpty()]
+        [string]$DriveLetter,
+        [ValidateNotNullOrEmpty()]
+        [string]$DestPath
+    )
+
+    $result = [PSCustomObject]@{
+        Resume       = $false
+        ExitCode     = 0
+        MissingBytes = 0
+        MissingCount = 0
+        LastRelPath  = ""
+        LastDestPath = ""
+        HashMatch    = $true
+        ErrorMessage = ""
+    }
+
+    if (-not (Test-Path -LiteralPath $DestPath)) {
+        $result.ErrorMessage = "Dest path not found."
+        return $result
+    }
+    if (-not (Test-Path -LiteralPath $CheckScriptPath)) {
+        $result.ErrorMessage = "Check script not found."
+        return $result
+    }
+
+    $driveLog = Get-DriveLogFile -Drive $DriveLetter
+    $checkScriptFull = [System.IO.Path]::GetFullPath($CheckScriptPath)
+    $checkArgs = @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", $checkScriptFull,
+        "-SourceRoot", $SourceRoot,
+        "-DestDrives", $DriveLetter,
+        "-NoConfirm",
+        "-NoPause",
+        "-Hash", # EnableHash,
+        "-LogFile", $driveLog,
+        "-HashLastN", 0,
+        "-HashAlgorithm", $HashAlgorithm
+    )
+    $null = & $script:ShellExe @checkArgs
+    $result.ExitCode = $LASTEXITCODE
+
+    if ($result.ExitCode -ne 4 -and $result.ExitCode -ne 5) {
+        return $result
+    }
+
+    $result.Resume = $true
+    $srcList = Get-Mp3ListSimple -Root $SourceRoot
+    $dstList = Get-Mp3ListSimple -Root $DestPath
+    if ($srcList.Count -eq 0 -or $dstList.Count -eq 0) {
+        $result.ErrorMessage = "Source or dest mp3 list empty."
+        $result.Resume = $false
+        return $result
+    }
+
+    $dstMap = @{}
+    foreach ($d in $dstList) {
+        $dstMap[$d.RelPath] = $d
+    }
+
+    $missingBytes = 0L
+    $missingCount = 0
+    $common = @()
+    foreach ($s in $srcList) {
+        if ($dstMap.ContainsKey($s.RelPath)) {
+            $common += $s
+        } else {
+            $missingCount++
+            $missingBytes += [int64]$s.Length
+        }
+    }
+
+    $result.MissingBytes = $missingBytes
+    $result.MissingCount = $missingCount
+
+    if ($common.Count -eq 0) {
+        $result.ErrorMessage = "No common mp3 files."
+        $result.Resume = $false
+        return $result
+    }
+
+    $lastCommon = $common | Sort-Object RelPath | Select-Object -Last 1
+    $dstFile = $dstMap[$lastCommon.RelPath]
+    $result.LastRelPath = $lastCommon.RelPath
+    $result.LastDestPath = $dstFile.FullName
+
+    $srcHash = Get-FileHashHex -Path $lastCommon.FullName -Algorithm $HashAlgorithm -Drive $DriveLetter
+    $dstHash = Get-FileHashHex -Path $dstFile.FullName -Algorithm $HashAlgorithm -Drive $DriveLetter
+    $result.HashMatch = ($srcHash -eq $dstHash)
+
+    return $result
+}
+
 # ================== KHỞI TẠO LOG ==================
 if ($script:LogDirIsEmpty) {
     Write-Host "Thư mục log rỗng. Vui lòng chỉ định -LogDir hợp lệ." -ForegroundColor Red
@@ -707,9 +1058,9 @@ if ($script:RemountScriptIsEmpty -or $script:RemountCacheIsEmpty) {
 }
 
 # ================== CẢNH BÁO RIÊNG CHO Ổ USB >= 16GB ==================
-$LargeUsb = $ValidTargets | Where-Object {
+$LargeUsb = @($ValidTargets | Where-Object {
     $usbMap[$_].Size -ge (16GB)
-}
+})
 
 if ($LargeUsb.Count -gt 0 -and -not $AutoYes) {
     Write-Host ""
@@ -722,7 +1073,7 @@ if ($LargeUsb.Count -gt 0 -and -not $AutoYes) {
     if (-not ($ans -and $ans.ToUpper() -eq 'Y')) {
         Write-Log "Người dùng chọn BỎ QUA các ổ >=16GB." "WARN"
         # Loại các ổ lớn khỏi danh sách
-        $ValidTargets = $ValidTargets | Where-Object { $LargeUsb -notcontains $_ }
+        $ValidTargets = @($ValidTargets | Where-Object { $LargeUsb -notcontains $_ })
     }
 }
 
@@ -753,6 +1104,8 @@ foreach ($drv in $ValidTargets) {
     $usedBytes = $totalSize - $freeSpace
     $usedMB = $usedBytes / 1MB
     $usedPct = if ($totalSize -gt 0) { $usedBytes / $totalSize } else { 0 }
+    $resumeCopy = $false
+    $resumeMissingBytes = 0L
 
     Write-Log ("--- ĐÁNH GIÁ Ổ {0} ---" -f $drv) -Drive $drv
     Write-Log ("Size={0:N2}GB, Free={1:N2}GB, Used={2:N2}MB ({3:P1})" -f `
@@ -779,6 +1132,32 @@ foreach ($drv in $ValidTargets) {
         }
         else {
             Write-Log ("CẢNH BÁO: ổ {0} đang có dữ liệu {1:N2}MB." -f $drv, $usedMB) "WARN" -Drive $drv
+
+            $resumeCopy = $false
+            $resumeMissingBytes = 0L
+            if (-not $skipCleanup -and $usedPct -ge 0.2) {
+                $destPath = Join-Path $drv (Split-Path $SourceRoot -Leaf)
+                Write-Log ("[RESUME] Pre-format check on {0}..." -f $drv) "WARN" -Drive $drv
+                $resumeInfo = Invoke-PreFormatResumeCheck -DriveLetter $drv -DestPath $destPath
+                if (($resumeInfo.ExitCode -eq 4 -or $resumeInfo.ExitCode -eq 5) -and $resumeInfo.Resume) {
+                    Write-Log ("[RESUME] ExitCode=4 or 5. Missing: {0} files, ~{1:N2}MB." -f $resumeInfo.MissingCount, ($resumeInfo.MissingBytes / 1MB)) "WARN" -Drive $drv
+                    if (-not $resumeInfo.HashMatch) {
+                        Write-Log ("[RESUME] Last file hash mismatch -> delete dest file: {0}" -f $resumeInfo.LastRelPath) "WARN" -Drive $drv
+                        try {
+                            Remove-Item -LiteralPath $resumeInfo.LastDestPath -Force -ErrorAction Stop
+                        }
+                        catch {
+                            Write-Log ("[RESUME] Failed to delete last file: {0}" -f $_.Exception.Message) "ERROR" -Drive $drv
+                        }
+                    } else {
+                        Write-Log "[RESUME] Last file hash match -> resume copy without format." -Drive $drv
+                    }
+                    $resumeCopy = $true
+                    $resumeMissingBytes = [int64]$resumeInfo.MissingBytes
+                    $skipCleanup = $true
+                }
+            }
+
 
             if ($skipCleanup) {
                 Write-Log ("Bỏ qua xóa/format ổ {0} theo lựa chọn của người dùng." -f $drv) "WARN" -Drive $drv
@@ -807,8 +1186,20 @@ foreach ($drv in $ValidTargets) {
             else {
                 $sizeMB = [double]($totalSize / 1MB)
                 $useFat16 = ($sizeMB -lt 4000)
-                $fsType = if ($useFat16) { "FAT16" } else { "FAT32" }
+                $fsType = if ($useFat16) { "FAT" } else { "FAT32" }
                 $clusterSize = if ($useFat16) { 16384 } else { 32768 }
+                if ($useFat16) {
+                    $required = [Math]::Ceiling([double]$totalSize / 65525)
+                    if ($required -gt $clusterSize) {
+                        $allowed = @(2048, 4096, 8192, 16384, 32768, 65536)
+                        $newSize = ($allowed | Where-Object { $_ -ge $required } | Select-Object -First 1)
+                        if (-not $newSize) { $newSize = $allowed[-1] }
+                        if ($newSize -ne $clusterSize) {
+                            Write-Log ("FAT16 cluster 16KB invalid for size, fallback to {0}KB." -f ($newSize / 1KB)) "WARN" -Drive $drv
+                            $clusterSize = $newSize
+                        }
+                    }
+                }
 
                 # Windows th??ng khong cho FAT32 > 32GB
                 if ((-not $useFat16) -and ($totalSize -gt 32GB)) {
@@ -818,9 +1209,10 @@ foreach ($drv in $ValidTargets) {
 
                 try {
                     $letter = $drv.TrimEnd(':')
-                    Write-Log ("Dang format {0} (cluster {1}KB) o {2}..." -f $fsType, ($clusterSize / 1KB), $drv) "WARN" -Drive $drv
+                    $fsLabel = if ($useFat16) { "FAT16" } else { $fsType }
+                    Write-Log ("Dang format {0} (cluster {1}KB) o {2}..." -f $fsLabel, ($clusterSize / 1KB), $drv) "WARN" -Drive $drv
                     Format-Volume -DriveLetter $letter -FileSystem $fsType -AllocationUnitSize $clusterSize -NewFileSystemLabel "USB_$letter" -Confirm:$false -Force -ErrorAction Stop
-                    Write-Log ("Da quick format {0} (cluster {1}KB) o {2}." -f $fsType, ($clusterSize / 1KB), $drv) -Drive $drv
+                    Write-Log ("Da quick format {0} (cluster {1}KB) o {2}." -f $fsLabel, ($clusterSize / 1KB), $drv) -Drive $drv
 
                     # Cho ? mount l?i
                     if (-not (Wait-DriveReady $drv 30)) {
@@ -841,9 +1233,10 @@ foreach ($drv in $ValidTargets) {
         }
 
         # BƯỚC 2: check freeSpace sau xử lý
-        if ($freeSpace -lt $sourceSize) {
-            Write-Log ("Ổ {0} KHÔNG đủ dung lượng trống sau xử lý. Free={1:N2}GB, Source~{2:N2}GB" -f `
-                    $drv, ($freeSpace / 1GB), ($sourceSize / 1GB)) "ERROR"
+        $requiredBytes = if ($resumeCopy) { $resumeMissingBytes } else { $sourceSize }
+        if ($freeSpace -lt $requiredBytes) {
+            $needLabel = if ($resumeCopy) { "Missing" } else { "Source" }
+            Write-Log ("? {0} KHONG du dung luong trong sau xu ly. Free={1:N2}GB, {2}~{3:N2}GB" -f $drv, ($freeSpace / 1GB), $needLabel, ($requiredBytes / 1GB)) "ERROR"
             continue
         }
 
@@ -864,6 +1257,12 @@ function Start-CopyProcess {
         [int]$ThreadNo
     )
 
+    $driveKey = Get-DriveKey $DriveLetter
+    if ($driveKey) {
+        if ($script:StartCopyErrors.ContainsKey($driveKey)) { $script:StartCopyErrors.Remove($driveKey) | Out-Null }
+        if ($script:CopyAbortReasons.ContainsKey($driveKey)) { $script:CopyAbortReasons.Remove($driveKey) | Out-Null }
+    }
+
     if (-not (Wait-DriveReady $DriveLetter 30)) {
         Write-Log ("Ổ {0} KHÔNG ready trước khi copy." -f $DriveLetter) "ERROR" -Drive $DriveLetter
         if (Try-RemountDrive -DriveLetter $DriveLetter -WaitSec 30) {
@@ -872,6 +1271,22 @@ function Start-CopyProcess {
             return $null
         }
     }
+
+    Write-Log ("[WRITE-TEST] {0}: test write small file before copy..." -f $DriveLetter) -Drive $DriveLetter
+    $writeTest = Test-DriveWriteSmallFile -DriveLetter $DriveLetter -MinBytes $script:WriteTestMinBytes -MaxBytes $script:WriteTestMaxBytes
+    if (-not $writeTest.Success) {
+        $msg = if ($writeTest.Message) { $writeTest.Message } else { "Write test failed." }
+        Write-Log ("[WRITE-TEST] {0}: FAIL -> FLAG SD BAD -> STOP. {1}" -f $DriveLetter, $msg) "ERROR" -Drive $DriveLetter
+        if ($driveKey) {
+            $script:StartCopyErrors[$driveKey] = [PSCustomObject]@{
+                Stage   = "WRITE_TEST"
+                Code    = 901
+                Message = ("FLAG SD BAD (pre-copy). {0}" -f $msg)
+            }
+        }
+        return $null
+    }
+    Write-Log ("[WRITE-TEST] {0}: OK ({1} KB)." -f $DriveLetter, ([Math]::Round($writeTest.SizeBytes / 1KB, 1))) -Drive $DriveLetter
 
     $destPath = Join-Path $DriveLetter (Split-Path $SourceRoot -Leaf)
     try {
@@ -883,6 +1298,8 @@ function Start-CopyProcess {
         Write-Log "Lỗi khi tạo thư mục đích $destPath trên ổ ${DriveLetter}: $_" "ERROR" -Drive $DriveLetter
         return $null
     }
+
+    Reset-CopySpeedState -DriveLetter $DriveLetter
 
     $srcArg = Quote-PathArg $SourceRoot
     $dstArg = Quote-PathArg $destPath
@@ -967,7 +1384,7 @@ function Invoke-PostCopyFlow {
     )
     if ($EnableHash) { $checkArgs += "-Hash" }
     Write-Log ("CMD CHECK ({0}): {1} {2}" -f $DriveLetter, $script:ShellExe, ($checkArgs -join " ")) -Drive $DriveLetter
-    & $script:ShellExe @checkArgs
+    $null = & $script:ShellExe @checkArgs
     $checkCode = $LASTEXITCODE
     $checkMsg = Get-CheckExitMessage -Code $checkCode
     if ($checkCode -ne 0) {
@@ -1001,7 +1418,7 @@ function Invoke-PostCopyFlow {
             "-Force"
         )
         Write-Log ("CMD SORT ({0}): {1} {2}" -f $DriveLetter, $script:ShellExe, ($sortArgs -join " ")) -Drive $DriveLetter
-        & $script:ShellExe @sortArgs
+        $null = & $script:ShellExe @sortArgs
         $sortCode = $LASTEXITCODE
         $sortMsg = Get-SortExitMessage -Code $sortCode
         if ($sortCode -ne 0 -and $sortCode -ne 2) {
@@ -1031,7 +1448,7 @@ function Invoke-PostCopyFlow {
     $drvArg = $DriveLetter.ToLower()
     $argListEject = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $ejectScriptFull, $drvArg)
     Write-Log ("CMD EJECT ({0}): {1} {2}" -f $DriveLetter, $script:ShellExe, ($argListEject -join " ")) -Drive $DriveLetter
-    & $script:ShellExe @argListEject
+    $null = & $script:ShellExe @argListEject
     $ejectCode = $LASTEXITCODE
     if ($ejectCode -ne 0) {
         Write-Log ("BƯỚC EJECT lỗi cho ổ {0} (ExitCode={1})." -f $DriveLetter, $ejectCode) "ERROR" -Drive $DriveLetter
@@ -1063,12 +1480,27 @@ foreach ($drv in $PreparedTargets) {
         $active += $procObj
     } else {
         $copyResults[$drv] = 999
-        $flowErrors[$drv] = [PSCustomObject]@{
-            Drive   = $drv
-            Success = $false
-            Stage   = "COPY"
-            Code    = 999
-            Message = "Failed to start robocopy."
+        $startErr = $null
+        $driveKey = Get-DriveKey $drv
+        if ($driveKey -and $script:StartCopyErrors.ContainsKey($driveKey)) {
+            $startErr = $script:StartCopyErrors[$driveKey]
+        }
+        if ($startErr) {
+            $flowErrors[$drv] = [PSCustomObject]@{
+                Drive   = $drv
+                Success = $false
+                Stage   = $startErr.Stage
+                Code    = $startErr.Code
+                Message = $startErr.Message
+            }
+        } else {
+            $flowErrors[$drv] = [PSCustomObject]@{
+                Drive   = $drv
+                Success = $false
+                Stage   = "COPY"
+                Code    = 999
+                Message = "Failed to start robocopy."
+            }
         }
     }
     Start-Sleep -Milliseconds 300
@@ -1085,6 +1517,11 @@ while ($active.Count -gt 0) {
 
     foreach ($item in @($active)) {
         $drv = $item.Drive
+        $driveKey = Get-DriveKey $drv
+        if ($driveKey -and $script:CopyAbortReasons.ContainsKey($driveKey)) {
+            continue
+        }
+
         if (-not $script:EarlyCopyErrors.ContainsKey($drv)) {
             $newLines = Read-NewLogLines -Drive $drv
             $errInfo = Get-RobocopyErrorFromLines -Lines $newLines
@@ -1095,6 +1532,34 @@ while ($active.Count -gt 0) {
                 try { Stop-Process -Id $item.Process.Id -Force -ErrorAction SilentlyContinue } catch { }
             }
         }
+
+        if (-not $script:EarlyCopyErrors.ContainsKey($drv)) {
+            $noProgress = Test-CopyNoProgress -DriveLetter $drv -NoProgressSec $script:CopyNoProgressSec -MinDeltaBytes $script:CopyNoProgressDeltaBytes
+            if ($noProgress) {
+                Write-Log ("[SPEED] {0}: 0 KB/s > {1}s -> pause copy, test write." -f $drv, $noProgress.NoProgressSec) "WARN" -Drive $drv
+                try { Stop-Process -Id $item.Process.Id -Force -ErrorAction SilentlyContinue } catch { }
+                $writeTest = Test-DriveWriteSmallFile -DriveLetter $drv -MinBytes $script:WriteTestMinBytes -MaxBytes $script:WriteTestMaxBytes
+                if (-not $writeTest.Success) {
+                    $msg = if ($writeTest.Message) { $writeTest.Message } else { "Write test failed." }
+                    Write-Log ("[WRITE-TEST] {0}: FAIL -> FLAG SD BAD -> ABORT COPY. {1}" -f $drv, $msg) "ERROR" -Drive $drv
+                    if ($driveKey) {
+                        $script:CopyAbortReasons[$driveKey] = [PSCustomObject]@{
+                            Flag    = "BAD"
+                            Message = ("FLAG SD BAD. {0}" -f $msg)
+                        }
+                    }
+                }
+                else {
+                    Write-Log ("[WRITE-TEST] {0}: OK -> FLAG SD WEAK -> ABORT COPY." -f $drv) "WARN" -Drive $drv
+                    if ($driveKey) {
+                        $script:CopyAbortReasons[$driveKey] = [PSCustomObject]@{
+                            Flag    = "WEAK"
+                            Message = ("FLAG SD WEAK. Write test OK after 0 KB/s > {0}s." -f $noProgress.NoProgressSec)
+                        }
+                    }
+                }
+            }
+        }
     }
 
     $doneSet = $active | Where-Object { $_.Process.HasExited }
@@ -1103,6 +1568,29 @@ while ($active.Count -gt 0) {
     foreach ($done in @($doneSet)) {
         $drv = $done.Drive
         $code = $done.Process.ExitCode
+        $driveKey = Get-DriveKey $drv
+        $abortInfo = $null
+        if ($driveKey -and $script:CopyAbortReasons.ContainsKey($driveKey)) {
+            $abortInfo = $script:CopyAbortReasons[$driveKey]
+        }
+
+        if ($abortInfo) {
+            $copyResults[$drv] = $code
+            $active = $active | Where-Object { $_.Process.Id -ne $done.Process.Id }
+            Write-Log ("COPY toi {0} BI ABORT. {1}" -f $drv, $abortInfo.Message) "ERROR" -Drive $drv
+            $flowErrors[$drv] = [PSCustomObject]@{
+                Drive   = $drv
+                Success = $false
+                Stage   = "COPY"
+                Code    = 998
+                Message = $abortInfo.Message
+            }
+            if ($driveKey -and $script:CopySpeedStates.ContainsKey($driveKey)) {
+                $script:CopySpeedStates.Remove($driveKey) | Out-Null
+            }
+            continue
+        }
+
         $earlyErr = $null
         if ($script:EarlyCopyErrors.ContainsKey($drv)) { $earlyErr = $script:EarlyCopyErrors[$drv] }
         $copyMsg = if ($earlyErr) { Format-RobocopyErrorMessage -ErrorInfo $earlyErr } else { Get-RobocopyExitMessage -Code $code }
