@@ -28,7 +28,7 @@
 
     # Đường dẫn script remount USB (dùng để capture / remount)
     [string]$RemountScriptPath = ".\Remount-Usb.ps1",
-    [string]$RemountCachePath  = ".\usb_remount_cache.json",
+    [string]$RemountCachePath = ".\usb_remount_cache.json",
 
     # Thư mục log
     [ValidateNotNullOrEmpty()]
@@ -64,8 +64,8 @@ $script:CopyNoProgressDeltaBytes = 4096
 $windowsIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $windowsPrincipal = New-Object Security.Principal.WindowsPrincipal($windowsIdentity)
 $adminRole = [Security.Principal.WindowsBuiltinRole]::Administrator
-
-if (-not $windowsPrincipal.IsInRole($adminRole)) {
+$script:IsAdmin = $windowsPrincipal.IsInRole($adminRole)
+if (-not $script:IsAdmin) {
     Write-Host "Script dang chay khong co quyen Administrator." -ForegroundColor Yellow
     $runAsAdmin = $false
     if (-not $AutoYes) {
@@ -73,7 +73,8 @@ if (-not $windowsPrincipal.IsInRole($adminRole)) {
         if ($ans -and $ans.Trim().ToUpper() -eq "Y") {
             $runAsAdmin = $true
         }
-    } else {
+    }
+    else {
         Write-Host "AutoYes dang bat -> tiep tuc chay khong co quyen Admin." -ForegroundColor Yellow
     }
 
@@ -111,8 +112,8 @@ $script:CheckPathIsEmpty = [string]::IsNullOrWhiteSpace($CheckScriptPath)
 $script:SortScriptIsEmpty = [string]::IsNullOrWhiteSpace($SortScriptPath)
 $script:EjectPathIsEmpty = [string]::IsNullOrWhiteSpace($EjectScriptPath)
 $script:RemountScriptIsEmpty = [string]::IsNullOrWhiteSpace($RemountScriptPath)
-$script:RemountCacheIsEmpty  = [string]::IsNullOrWhiteSpace($RemountCachePath)
-$script:LogDirIsEmpty        = [string]::IsNullOrWhiteSpace($LogDir)
+$script:RemountCacheIsEmpty = [string]::IsNullOrWhiteSpace($RemountCachePath)
+$script:LogDirIsEmpty = [string]::IsNullOrWhiteSpace($LogDir)
 
 if ($script:EjectPathIsEmpty) {
     $script:SkipEjectEffective = $true
@@ -139,39 +140,8 @@ if (-not $script:RemountCacheIsEmpty -and -not [System.IO.Path]::IsPathRooted($R
 if (-not $script:LogDirIsEmpty -and -not [System.IO.Path]::IsPathRooted($LogDir)) {
     $LogDir = Join-Path $ScriptDir $LogDir
 }
-# Kiểm tra quyền admin (phục vụ cảnh báo remount)
-$script:IsAdmin = $false
-try {
+# ================== HÀM TIỆN ÍCH CHUNG ==================
 
-    $letter = $drv.TrimEnd(':')
-
-    Write-Log ("Dang format {0} (cluster {1}KB) o {2}..." -f $fsType, ($clusterSize / 1KB), $drv) "WARN" -Drive $drv
-
-    Format-Volume -DriveLetter $letter -FileSystem $fsType -AllocationUnitSize $clusterSize -NewFileSystemLabel "USB_$letter" -Confirm:$false -Force -ErrorAction Stop
-
-    Write-Log ("Da quick format {0} (cluster {1}KB) o {2}." -f $fsType, ($clusterSize / 1KB), $drv) -Drive $drv
-
-
-    # Cho ? mount l?i
-
-    if (-not (Wait-DriveReady $drv 30)) {
-
-        Write-Log "Sau khi format, ? $drv khong ready trong 30s. B? QUA ? nay." "ERROR" -Drive $drv
-
-        continue
-
-    }
-
-
-    $disk = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='{0}'" -f $drv)
-
-    $totalSize = [double]$disk.Size
-
-    $freeSpace = [double]$disk.FreeSpace
-
-}
-
-catch {
 function Get-DriveKey {
     param([string]$Drive)
 
@@ -661,7 +631,8 @@ function Get-FileHashHex {
         $algoName = "MD5"
         if ($Drive) {
             Write-Log ("[RESUME] HashAlgorithm {0} not supported, fallback to MD5." -f $Algorithm) "WARN" -Drive $Drive
-        } else {
+        }
+        else {
             Write-Log ("[RESUME] HashAlgorithm {0} not supported, fallback to MD5." -f $Algorithm) "WARN"
         }
     }
@@ -784,7 +755,8 @@ function Invoke-PreFormatResumeCheck {
     foreach ($s in $srcList) {
         if ($dstMap.ContainsKey($s.RelPath)) {
             $common += $s
-        } else {
+        }
+        else {
             $missingCount++
             $missingBytes += [int64]$s.Length
         }
@@ -858,7 +830,8 @@ if ($CheckAndSort) {
         Write-Log "Script SORT không tồn tại: $SortScriptPath" "ERROR"
         exit 1
     }
-} else {
+}
+else {
     Write-Log "Bỏ qua bước SORT (CheckAndSort = false)." "WARN"
 }
 
@@ -867,13 +840,16 @@ if (-not $script:SkipEjectEffective) {
     if ($script:EjectPathIsEmpty) {
         Write-Log "EjectScriptPath rỗng -> bỏ qua bước EJECT." "WARN"
         $script:SkipEjectEffective = $true
-    } elseif (-not (Test-Path $EjectScriptPath)) {
+    }
+    elseif (-not (Test-Path $EjectScriptPath)) {
         Write-Log "Script EJECT không tồn tại: $EjectScriptPath" "ERROR"
         exit 1
     }
-} elseif ($script:EjectPathIsEmpty) {
+}
+elseif ($script:EjectPathIsEmpty) {
     Write-Log "EjectScriptPath rỗng -> bỏ qua bước EJECT." "WARN"
-} else {
+}
+else {
     Write-Log "Bỏ qua bước EJECT (SkipEject được bật)." "WARN"
 }
 
@@ -1014,7 +990,7 @@ foreach ($drv in $DestDrives) {
             continue
         }
         if ($disk.Size -lt $sourceSize) {
-            Write-Log ("Ổ {0} có Size {1:N2}GB nhỏ hơn dung lượng source {2:N2}GB. Bỏ qua." -f $upper, ($disk.Size/1GB), ($sourceSize/1GB)) "WARN" -Drive $upper
+            Write-Log ("Ổ {0} có Size {1:N2}GB nhỏ hơn dung lượng source {2:N2}GB. Bỏ qua." -f $upper, ($disk.Size / 1GB), ($sourceSize / 1GB)) "WARN" -Drive $upper
             continue
         }
         Write-Log ("Ổ {0} (USB) Size={1:N2}GB, Free={2:N2}GB" -f `
@@ -1037,7 +1013,8 @@ if ($script:RemountScriptIsEmpty -or $script:RemountCacheIsEmpty) {
     if ($script:RemountCacheIsEmpty) {
         Write-Log "RemountCachePath rỗng -> không thể lưu cache remount, bỏ qua remount." "WARN"
     }
-} elseif (Test-Path $RemountScriptPath) {
+}
+elseif (Test-Path $RemountScriptPath) {
     Write-Log "Capture thông tin remount cho các ổ USB hợp lệ..."
     foreach ($drv in $ValidTargets) {
         try {
@@ -1045,7 +1022,8 @@ if ($script:RemountScriptIsEmpty -or $script:RemountCacheIsEmpty) {
             $capCode = $LASTEXITCODE
             if ($capCode -eq 0) {
                 Write-Log ("Capture remount OK cho ổ {0}, cache: {1}" -f $drv, $RemountCachePath) -Drive $drv
-            } else {
+            }
+            else {
                 Write-Log ("Capture remount cho ổ {0} thất bại (ExitCode={1}). Tiếp tục mà không có cache remount cho ổ này." -f $drv, $capCode) "WARN" -Drive $drv
             }
         }
@@ -1053,14 +1031,15 @@ if ($script:RemountScriptIsEmpty -or $script:RemountCacheIsEmpty) {
             Write-Log ("Lỗi khi capture remount ở {0}: {1}" -f $drv, $_) "WARN" -Drive $drv
         }
     }
-} else {
+}
+else {
     Write-Log "Không tìm thấy Remount-Usb.ps1, bỏ qua bước capture remount." "WARN"
 }
 
 # ================== CẢNH BÁO RIÊNG CHO Ổ USB >= 16GB ==================
 $LargeUsb = @($ValidTargets | Where-Object {
-    $usbMap[$_].Size -ge (16GB)
-})
+        $usbMap[$_].Size -ge (16GB)
+    })
 
 if ($LargeUsb.Count -gt 0 -and -not $AutoYes) {
     Write-Host ""
@@ -1090,11 +1069,11 @@ if ($ValidTargets.Count -eq 0) {
 #    - Nếu usedMB < 20MB → giữ nguyên data, chỉ copy thêm.
 #    - Nếu usedMB >= 20MB:
 #       * Nếu usedPct < 20% → OPTION A: xóa toàn bộ file trên ổ.
-#       * Ngược lại → OPTION B: QUICK FORMAT.
+#       * Ngược lại175 → OPTION B: QUICK FORMAT.
 # 3) Sau khi xử lý data, check lại freeSpace >= sourceSize → mới được copy.
 
 $PreparedTargets = @()
-$MirrorTargets   = @()
+$MirrorTargets = @()
 
 foreach ($drv in $ValidTargets) {
 
@@ -1106,6 +1085,7 @@ foreach ($drv in $ValidTargets) {
     $usedPct = if ($totalSize -gt 0) { $usedBytes / $totalSize } else { 0 }
     $resumeCopy = $false
     $resumeMissingBytes = 0L
+    $skipCopy = $false
 
     Write-Log ("--- ĐÁNH GIÁ Ổ {0} ---" -f $drv) -Drive $drv
     Write-Log ("Size={0:N2}GB, Free={1:N2}GB, Used={2:N2}MB ({3:P1})" -f `
@@ -1139,7 +1119,12 @@ foreach ($drv in $ValidTargets) {
                 $destPath = Join-Path $drv (Split-Path $SourceRoot -Leaf)
                 Write-Log ("[RESUME] Pre-format check on {0}..." -f $drv) "WARN" -Drive $drv
                 $resumeInfo = Invoke-PreFormatResumeCheck -DriveLetter $drv -DestPath $destPath
-                if (($resumeInfo.ExitCode -eq 4 -or $resumeInfo.ExitCode -eq 5) -and $resumeInfo.Resume) {
+                if ($resumeInfo.ExitCode -eq 0) {
+                    Write-Log "[RESUME] Dest matches source -> skip format/copy." "WARN" -Drive $drv
+                    $skipCleanup = $true
+                    $skipCopy = $true
+                }
+                elseif (($resumeInfo.ExitCode -eq 4 -or $resumeInfo.ExitCode -eq 5) -and $resumeInfo.Resume) {
                     Write-Log ("[RESUME] ExitCode=4 or 5. Missing: {0} files, ~{1:N2}MB." -f $resumeInfo.MissingCount, ($resumeInfo.MissingBytes / 1MB)) "WARN" -Drive $drv
                     if (-not $resumeInfo.HashMatch) {
                         Write-Log ("[RESUME] Last file hash mismatch -> delete dest file: {0}" -f $resumeInfo.LastRelPath) "WARN" -Drive $drv
@@ -1149,7 +1134,8 @@ foreach ($drv in $ValidTargets) {
                         catch {
                             Write-Log ("[RESUME] Failed to delete last file: {0}" -f $_.Exception.Message) "ERROR" -Drive $drv
                         }
-                    } else {
+                    }
+                    else {
                         Write-Log "[RESUME] Last file hash match -> resume copy without format." -Drive $drv
                     }
                     $resumeCopy = $true
@@ -1157,7 +1143,6 @@ foreach ($drv in $ValidTargets) {
                     $skipCleanup = $true
                 }
             }
-
 
             if ($skipCleanup) {
                 Write-Log ("Bỏ qua xóa/format ổ {0} theo lựa chọn của người dùng." -f $drv) "WARN" -Drive $drv
@@ -1214,9 +1199,9 @@ foreach ($drv in $ValidTargets) {
                     Format-Volume -DriveLetter $letter -FileSystem $fsType -AllocationUnitSize $clusterSize -NewFileSystemLabel "USB_$letter" -Confirm:$false -Force -ErrorAction Stop
                     Write-Log ("Da quick format {0} (cluster {1}KB) o {2}." -f $fsLabel, ($clusterSize / 1KB), $drv) -Drive $drv
 
-                    # Cho ? mount l?i
+                    # Cho ổ mount lỗi
                     if (-not (Wait-DriveReady $drv 30)) {
-                        Write-Log "Sau khi format, ? $drv khong ready trong 30s. B? QUA ? nay." "ERROR" -Drive $drv
+                        Write-Log "Sau khi format, ? $drv khong ready trong 30s. Bỏ qua ổ này." "ERROR" -Drive $drv
                         continue
                     }
 
@@ -1228,22 +1213,27 @@ foreach ($drv in $ValidTargets) {
                     Write-Log "Lỗi khi format ổ ${drv}: $_" "ERROR" -Drive $drv
                     continue
                 }
-                }
             }
         }
-
-        # BƯỚC 2: check freeSpace sau xử lý
-        $requiredBytes = if ($resumeCopy) { $resumeMissingBytes } else { $sourceSize }
-        if ($freeSpace -lt $requiredBytes) {
-            $needLabel = if ($resumeCopy) { "Missing" } else { "Source" }
-            Write-Log ("? {0} KHONG du dung luong trong sau xu ly. Free={1:N2}GB, {2}~{3:N2}GB" -f $drv, ($freeSpace / 1GB), $needLabel, ($requiredBytes / 1GB)) "ERROR"
-            continue
-        }
-
-        Write-Log ("Ổ {0} đủ điều kiện để copy." -f $drv) -Drive $drv
-        $PreparedTargets += $drv
     }
+
+    if ($skipCopy) {
+        Write-Log ("O {0} da khop nguon -> bo qua copy/check/sort." -f $drv) "WARN" -Drive $drv
+        continue
+    }
+
+    # BƯỚC 2: check freeSpace sau xử lý
+    $requiredBytes = if ($resumeCopy) { $resumeMissingBytes } else { $sourceSize }
+    if ($freeSpace -lt $requiredBytes) {
+        $needLabel = if ($resumeCopy) { "Missing" } else { "Source" }
+        Write-Log ("? {0} KHONG du dung luong trong sau xu ly. Free={1:N2}GB, {2}~{3:N2}GB" -f $drv, ($freeSpace / 1GB), $needLabel, ($requiredBytes / 1GB)) "ERROR"
+        continue
+    }
+
+    Write-Log ("Ổ {0} đủ điều kiện để copy." -f $drv) -Drive $drv
+    $PreparedTargets += $drv
 }
+
 if ($PreparedTargets.Count -eq 0) {
     Write-Log "Không còn ổ nào đủ điều kiện để copy sau khi đánh giá dung lượng & dữ liệu." "ERROR"
     exit 1
@@ -1267,7 +1257,8 @@ function Start-CopyProcess {
         Write-Log ("Ổ {0} KHÔNG ready trước khi copy." -f $DriveLetter) "ERROR" -Drive $DriveLetter
         if (Try-RemountDrive -DriveLetter $DriveLetter -WaitSec 30) {
             Write-Log ("Ổ {0} đã remount, tiếp tục copy." -f $DriveLetter) "WARN" -Drive $DriveLetter
-        } else {
+        }
+        else {
             return $null
         }
     }
@@ -1478,7 +1469,8 @@ foreach ($drv in $PreparedTargets) {
     $procObj = Start-CopyProcess -DriveLetter $drv -UseMirror $useMirror -ThreadNo $threadNo
     if ($procObj) {
         $active += $procObj
-    } else {
+    }
+    else {
         $copyResults[$drv] = 999
         $startErr = $null
         $driveKey = Get-DriveKey $drv
@@ -1493,7 +1485,8 @@ foreach ($drv in $PreparedTargets) {
                 Code    = $startErr.Code
                 Message = $startErr.Message
             }
-        } else {
+        }
+        else {
             $flowErrors[$drv] = [PSCustomObject]@{
                 Drive   = $drv
                 Success = $false
@@ -1511,7 +1504,8 @@ while ((@($active)).Count -gt 0) {
     $procs = $active | Select-Object -ExpandProperty Process
     try {
         [void](Wait-Process -InputObject $procs -Any -Timeout 5 -ErrorAction SilentlyContinue)
-    } catch {
+    }
+    catch {
         Start-Sleep -Seconds 1
     }
 
@@ -1632,7 +1626,8 @@ while ((@($active)).Count -gt 0) {
                     $copyResults.Remove($drv) | Out-Null
                     $active += $retryProc
                     continue
-                } else {
+                }
+                else {
                     Write-Log ("Khởi động copy lại ổ {0} sau remount thất bại." -f $drv) "ERROR" -Drive $drv
                 }
             }
@@ -1656,7 +1651,8 @@ while ((@($active)).Count -gt 0) {
             if ($retryProc) {
                 $copyResults.Remove($drv) | Out-Null
                 $active += $retryProc
-            } else {
+            }
+            else {
                 Write-Log ("Khởi động copy lại ổ {0} thất bại, giữ nguyên lỗi trước đó." -f $drv) "ERROR" -Drive $drv
                 $flowErrors[$drv] = [PSCustomObject]@{
                     Drive   = $drv
@@ -1692,7 +1688,8 @@ if ($flowErrors.Count -gt 0) {
         }
     }
     $overallExitCode = 1
-} else {
+}
+else {
     Write-Log "Tất cả các ổ đã hoàn tất đầy đủ các bước."
 }
 
@@ -1700,6 +1697,6 @@ Write-Log "===== QUY TRÌNH HOÀN THÀNH ====="
 Write-Host ""
 Write-Host "Log file: $script:LogFile" -ForegroundColor Cyan
 if ($overallExitCode -ne 0) {
-	pause 
-	exit $overallExitCode
-	}
+    pause 
+    exit $overallExitCode
+}
