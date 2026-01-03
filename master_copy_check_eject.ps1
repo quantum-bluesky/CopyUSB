@@ -1507,7 +1507,7 @@ foreach ($drv in $PreparedTargets) {
 }
 
 # Giam sat tien trinh copy theo o
-while ($active.Count -gt 0) {
+while ((@($active)).Count -gt 0) {
     $procs = $active | Select-Object -ExpandProperty Process
     try {
         [void](Wait-Process -InputObject $procs -Any -Timeout 5 -ErrorAction SilentlyContinue)
@@ -1576,7 +1576,7 @@ while ($active.Count -gt 0) {
 
         if ($abortInfo) {
             $copyResults[$drv] = $code
-            $active = $active | Where-Object { $_.Process.Id -ne $done.Process.Id }
+            $active = @($active | Where-Object { $_.Process.Id -ne $done.Process.Id })
             Write-Log ("COPY toi {0} BI ABORT. {1}" -f $drv, $abortInfo.Message) "ERROR" -Drive $drv
             $flowErrors[$drv] = [PSCustomObject]@{
                 Drive   = $drv
@@ -1597,7 +1597,7 @@ while ($active.Count -gt 0) {
         $isFailure = $false
         if ($earlyErr) { $isFailure = $true } elseif ($code -ge 8) { $isFailure = $true }
         $copyResults[$drv] = $code
-        $active = $active | Where-Object { $_.Process.Id -ne $done.Process.Id }
+        $active = @($active | Where-Object { $_.Process.Id -ne $done.Process.Id })
 
         if (-not $isFailure) {
             Write-Log ("COPY toi {0} HOAN TAT. ExitCode={1}. {2}" -f $drv, $code, $copyMsg) -Drive $drv
