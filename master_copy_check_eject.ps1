@@ -1,11 +1,14 @@
 param(
     # Thư mục nguồn cần copy (chứa dữ liệu gốc)
+    [ValidateNotNullOrEmpty()]
     [string]$SourceRoot = "D:\A Di Da Phat",
 
     # Danh sách ổ đích (USB) cần xử lý
+    [ValidateNotNullOrEmpty()]
     [string[]]$DestDrives = @("F:", "G:", "H:", "I:", "J:", "K:", "L:", "M:"),
 
     # Đường dẫn script CHECK
+    [ValidateNotNullOrEmpty()]
     [string]$CheckScriptPath = ".\check_copy_hash.ps1",
     # Đường dẫn script SORT (Mp3FatSort)
     [string]$SortScriptPath = ".\Mp3FatSort.ps1",
@@ -28,6 +31,7 @@ param(
     [string]$RemountCachePath  = ".\usb_remount_cache.json",
 
     # Thư mục log
+    [ValidateNotNullOrEmpty()]
     [string]$LogDir = ".\logs",
 
     # Không hỏi confirm (auto yes)
@@ -38,6 +42,12 @@ param(
     [switch]$SkipEject
 )
 
+Set-StrictMode -Version Latest
+
+$script:DriveLogFiles = @{}
+$script:DriveLogStates = @{}
+$script:EarlyCopyErrors = @{}
+
 # Chạy với quyền Administrator
 # Kiểm tra quyền admin
 $windowsIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -45,43 +55,42 @@ $windowsPrincipal = New-Object Security.Principal.WindowsPrincipal($windowsIdent
 $adminRole = [Security.Principal.WindowsBuiltinRole]::Administrator
 
 if (-not $windowsPrincipal.IsInRole($adminRole)) {
-    Write-Host "Script không có quyền admin. Đang khởi động lại với quyền admin..." -ForegroundColor Yellow
-    Pause
-    # Tạo lệnh chạy lại script với tất cả tham số
-    $scriptPath = $MyInvocation.MyCommand.Path
-    $args = $MyInvocation.BoundParameters.Values | ForEach-Object { 
-        if ($_ -is [switch]) {
-            "-$($MyInvocation.BoundParameters.Keys | Where-Object { $MyInvocation.BoundParameters[$_] -eq $_ })"
+    Write-Host "Script dang chay khong co quyen Administrator." -ForegroundColor Yellow
+    $runAsAdmin = $false
+    if (-not $AutoYes) {
+        $ans = Read-Host "Chay lai voi quyen Administrator? (Y/N, mac dinh = N)"
+        if ($ans -and $ans.Trim().ToUpper() -eq "Y") {
+            $runAsAdmin = $true
         }
-        else {
-            "-$key `"$_`""
+    } else {
+        Write-Host "AutoYes dang bat -> tiep tuc chay khong co quyen Admin." -ForegroundColor Yellow
+    }
+
+    if ($runAsAdmin) {
+        $scriptPath = $MyInvocation.MyCommand.Path
+        $allArgs = @()
+        foreach ($param in $PSBoundParameters.Keys) {
+            $value = $PSBoundParameters[$param]
+            if ($value -is [switch]) {
+                if ($value.IsPresent) { $allArgs += "-$param" }
+            }
+            elseif ($value -is [System.Array]) {
+                foreach ($item in $value) {
+                    $allArgs += "-$param"
+                    $allArgs += "$item"
+                }
+            }
+            else {
+                $allArgs += "-$param"
+                $allArgs += "$value"
+            }
         }
+
+        $shellExe = if (Get-Command pwsh.exe -ErrorAction SilentlyContinue) { "pwsh.exe" } else { "powershell.exe" }
+        $baseArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $scriptPath)
+        Start-Process $shellExe -ArgumentList ($baseArgs + $allArgs) -Verb RunAs
+        exit
     }
-    
-    # Nếu script được gọi từ Command Line, khôi phục các tham số
-    $allArgs = @()
-    foreach ($param in $PSBoundParameters.Keys) {
-        $value = $PSBoundParameters[$param]
-        if ($value -is [switch]) {
-            if ($value) { $allArgs += "-$param" }
-        }
-        else {
-            $allArgs += "-$param"
-            $allArgs += """$value"""
-        }
-    }
-    
-    $argString = if ($allArgs.Count -gt 0) { $allArgs -join ' ' } else { '' }
-    if (Get-Command pwsh.exe -ErrorAction SilentlyContinue) {
-        # Nếu có PowerShell 7+, dùng pwsh
-        Start-Process pwsh.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" $argString" -Verb RunAs
-    }
-    else {
-        # Dùng PowerShell 5.1 mặc định
-        Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" $argString" -Verb RunAs
-    }
-	pause
-    exit
 }
 
 
@@ -122,18 +131,235 @@ if (-not $script:LogDirIsEmpty -and -not [System.IO.Path]::IsPathRooted($LogDir)
 # Kiểm tra quyền admin (phục vụ cảnh báo remount)
 $script:IsAdmin = $false
 try {
-    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = [Security.Principal.WindowsPrincipal]::new($id)
-    $script:IsAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+    $letter = $drv.TrimEnd(':')
+
+    Write-Log ("Dang format {0} (cluster {1}KB) o {2}..." -f $fsType, ($clusterSize / 1KB), $drv) "WARN" -Drive $drv
+
+    Format-Volume -DriveLetter $letter -FileSystem $fsType -AllocationUnitSize $clusterSize -NewFileSystemLabel "USB_$letter" -Confirm:$false -Force -ErrorAction Stop
+
+    Write-Log ("Da quick format {0} (cluster {1}KB) o {2}." -f $fsType, ($clusterSize / 1KB), $drv) -Drive $drv
+
+
+    # Cho ? mount l?i
+
+    if (-not (Wait-DriveReady $drv 30)) {
+
+        Write-Log "Sau khi format, ? $drv khong ready trong 30s. B? QUA ? nay." "ERROR" -Drive $drv
+
+        continue
+
+    }
+
+
+    $disk = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='{0}'" -f $drv)
+
+    $totalSize = [double]$disk.Size
+
+    $freeSpace = [double]$disk.FreeSpace
+
 }
-catch { $script:IsAdmin = $false }
+
+catch {
+function Get-DriveKey {
+    param([string]$Drive)
+
+    if ([string]::IsNullOrWhiteSpace($Drive)) { return $null }
+    return $Drive.Trim().TrimEnd(':').ToUpperInvariant()
+}
+
+function Get-DriveLogFile {
+    param([string]$Drive)
+
+    $key = Get-DriveKey $Drive
+    if (-not $key -or -not $script:LogBaseName) { return $null }
+    if (-not $script:DriveLogFiles.ContainsKey($key)) {
+        $name = "{0}_{1}.log" -f $script:LogBaseName, $key
+        $script:DriveLogFiles[$key] = Join-Path $LogDir $name
+    }
+    return $script:DriveLogFiles[$key]
+}
+
+function Get-DriveLogState {
+    param([string]$Drive)
+
+    $key = Get-DriveKey $Drive
+    if (-not $key) { return $null }
+    if (-not $script:DriveLogStates.ContainsKey($key)) {
+        $script:DriveLogStates[$key] = [PSCustomObject]@{
+            Position = 0L
+            Buffer   = ""
+        }
+    }
+    return $script:DriveLogStates[$key]
+}
+
+function Read-NewLogLines {
+    param([string]$Drive)
+
+    $logPath = Get-DriveLogFile $Drive
+    if (-not $logPath -or -not (Test-Path -LiteralPath $logPath)) { return @() }
+
+    $state = Get-DriveLogState $Drive
+    if (-not $state) { return @() }
+
+    $fs = $null
+    $sr = $null
+    try {
+        $fs = [System.IO.File]::Open($logPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        if ($state.Position -gt $fs.Length) {
+            $state.Position = 0L
+        }
+        [void]$fs.Seek($state.Position, [System.IO.SeekOrigin]::Begin)
+        $sr = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::Default, $true)
+        $text = $sr.ReadToEnd()
+        $state.Position = $fs.Position
+    }
+    finally {
+        if ($sr) { $sr.Dispose() }
+        if ($fs) { $fs.Dispose() }
+    }
+
+    if ([string]::IsNullOrEmpty($text)) { return @() }
+
+    $text = $state.Buffer + $text
+    $lines = $text -split "`r?`n"
+    if (-not ($text.EndsWith("`n") -or $text.EndsWith("`r"))) {
+        if ($lines.Count -gt 0) {
+            $state.Buffer = $lines[-1]
+            if ($lines.Count -gt 1) {
+                return $lines[0..($lines.Count - 2)]
+            }
+        }
+        return @()
+    }
+
+    $state.Buffer = ""
+    return $lines
+}
+
+function Get-Win32ErrorMessage {
+    param([int]$Code)
+
+    try {
+        return ([ComponentModel.Win32Exception]$Code).Message
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-RobocopyErrorFromLines {
+    param([string[]]$Lines)
+
+    if (-not $Lines -or $Lines.Count -eq 0) { return $null }
+
+    for ($i = 0; $i -lt $Lines.Count; $i++) {
+        $line = $Lines[$i]
+        if (-not $line) { continue }
+        $line = $line.Trim()
+        if ($line -match '^ERROR\s+(\d+)\s+\((0x[0-9A-Fa-f]+)\)\s+(.*)$') {
+            $code = [int]$matches[1]
+            $action = $matches[3].Trim()
+            $detail = $null
+            if ($i + 1 -lt $Lines.Count) {
+                $nextLine = $Lines[$i + 1]
+                if ($nextLine) {
+                    $nextLine = $nextLine.Trim()
+                    if ($nextLine -and ($nextLine -notmatch '^ERROR')) {
+                        $detail = $nextLine
+                    }
+                }
+            }
+            return [PSCustomObject]@{
+                Win32Code    = $code
+                Win32Message = (Get-Win32ErrorMessage -Code $code)
+                Action       = $action
+                Detail       = $detail
+                Raw          = $line
+            }
+        }
+        if ($line -match '^ERROR:\s*(.+)$') {
+            return [PSCustomObject]@{
+                Win32Code    = $null
+                Win32Message = $null
+                Action       = $matches[1].Trim()
+                Detail       = $null
+                Raw          = $line
+            }
+        }
+    }
+
+    return $null
+}
+
+function Format-RobocopyErrorMessage {
+    param([pscustomobject]$ErrorInfo)
+
+    if (-not $ErrorInfo) { return "" }
+
+    $parts = @()
+    if ($ErrorInfo.Action) { $parts += $ErrorInfo.Action }
+    if ($ErrorInfo.Win32Code) {
+        $winMsg = if ($ErrorInfo.Win32Message) { $ErrorInfo.Win32Message } else { "Win32 error" }
+        $parts += ("Win32={0} ({1})" -f $ErrorInfo.Win32Code, $winMsg)
+    }
+    if ($ErrorInfo.Detail) { $parts += $ErrorInfo.Detail }
+
+    if ($parts.Count -eq 0) { return $ErrorInfo.Raw }
+    return ($parts -join " | ")
+}
+
+function Get-RobocopyExitMessage {
+    param([int]$Code)
+
+    switch ($Code) {
+        0 { return "No files copied. Source and destination are already in sync." }
+        1 { return "Files copied successfully." }
+        2 { return "Extra files or directories detected at destination." }
+        3 { return "Files copied and extra files detected at destination." }
+        4 { return "Mismatched files detected." }
+        5 { return "Files copied and mismatched files detected." }
+        6 { return "Extra files and mismatched files detected." }
+        7 { return "Files copied, extra files and mismatched files detected." }
+        default { return "Copy failed. See robocopy log for details." }
+    }
+}
+
+function Get-CheckExitMessage {
+    param([int]$Code)
+
+    switch ($Code) {
+        0 { return "OK." }
+        1 { return "Error while checking destination or source." }
+        2 { return "Mismatch: size or hash differences found." }
+        3 { return "Mismatch: extra files exist on destination." }
+        4 { return "Mismatch: missing files (parent folders empty)." }
+        5 { return "Mismatch: missing files (parent folders have files)." }
+        default { return "Unknown check result." }
+    }
+}
+
+function Get-SortExitMessage {
+    param([int]$Code)
+
+    switch ($Code) {
+        0 { return "Already sorted." }
+        1 { return "Check failed (NG)." }
+        2 { return "Sorted and applied changes." }
+        3 { return "Cancelled by user." }
+        4 { return "Sort error." }
+        default { return "Unknown sort result." }
+    }
+}
 
 
 # ================== HÀM GHI LOG ==================
 function Write-Log {
     param(
         [string]$Message,
-        [string]$Level = "INFO"
+        [string]$Level = "INFO",
+        [string]$Drive
     )
 
     $timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
@@ -148,6 +374,12 @@ function Write-Log {
 
     if ($script:LogFile) {
         Add-Content -Path $script:LogFile -Value $line -Encoding utf8
+    }
+    if ($Drive) {
+        $driveLog = Get-DriveLogFile -Drive $Drive
+        if ($driveLog) {
+            Add-Content -Path $driveLog -Value $line -Encoding utf8
+        }
     }
 }
 
@@ -210,22 +442,22 @@ function Try-RemountDrive {
         return $false
     }
 
-    Write-Log ("Thử remount ổ {0}..." -f $DriveLetter) "WARN"
+    Write-Log ("Thử remount ổ {0}..." -f $DriveLetter) "WARN" -Drive $DriveLetter
     try {
         & $script:ShellExe -NoProfile -ExecutionPolicy Bypass -File $RemountScriptPath -Mode Remount -Drive $DriveLetter -CachePath $RemountCachePath -WaitSec $WaitSec
         $code = $LASTEXITCODE
     }
     catch {
-        Write-Log ("Lỗi khi chạy Remount-Usb cho ổ {0}: {1}" -f $DriveLetter, $_) "ERROR"
+        Write-Log ("Lỗi khi chạy Remount-Usb cho ổ {0}: {1}" -f $DriveLetter, $_) "ERROR" -Drive $DriveLetter
         return $false
     }
 
     if ($code -eq 0 -and (Wait-DriveReady $DriveLetter $WaitSec)) {
-        Write-Log ("Remount ổ {0} thành công." -f $DriveLetter)
+        Write-Log ("Remount ổ {0} thành công." -f $DriveLetter) -Drive $DriveLetter
         return $true
     }
 
-    Write-Log ("Remount ổ {0} thất bại (ExitCode={1})." -f $DriveLetter, $code) "WARN"
+    Write-Log ("Remount ổ {0} thất bại (ExitCode={1})." -f $DriveLetter, $code) "WARN" -Drive $DriveLetter
     return $false
 }
 # ================== KHỞI TẠO LOG ==================
@@ -239,6 +471,7 @@ if (-not (Test-Path $LogDir)) {
 $logName = "copycheckeject_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss")
 $script:LogFile = Join-Path $LogDir $logName
 $script:LogFile = [System.IO.Path]::GetFullPath($script:LogFile)
+$script:LogBaseName = [System.IO.Path]::GetFileNameWithoutExtension($script:LogFile)
 
 Write-Log "===== BẮT ĐẦU QUY TRÌNH COPY - CHECK - EJECT ====="
 # ================== KIỂM TRA THAM SỐ CƠ BẢN ==================
@@ -313,7 +546,7 @@ Write-Host "CheckAndSort    : $CheckAndSort"
 Write-Host "EjectScriptPath : $EjectScriptPath"
 Write-Host "RemountScript   : $RemountScriptPath"
 Write-Host "RemountCache    : $RemountCachePath"
-Write-Host "LogFile         : $LogFile"
+Write-Host "LogFile         : $script:LogFile"
 Write-Host "EnableHash      : $($EnableHash.IsPresent)"
 Write-Host "HashLastN       : $HashLastN"
 Write-Host "HashAlgorithm   : $HashAlgorithm"
@@ -426,11 +659,11 @@ foreach ($drv in $DestDrives) {
             continue
         }
         if (-not $disk.Size -or $disk.Size -le 0) {
-            Write-Log "Ổ $upper có Size=0 (có thể không có thẻ nhớ). Bỏ qua." "WARN"
+            Write-Log "Ổ $upper có Size=0 (có thể không có thẻ nhớ). Bỏ qua." "WARN" -Drive $upper
             continue
         }
         if ($disk.Size -lt $sourceSize) {
-            Write-Log ("Ổ {0} có Size {1:N2}GB nhỏ hơn dung lượng source {2:N2}GB. Bỏ qua." -f $upper, ($disk.Size/1GB), ($sourceSize/1GB)) "WARN"
+            Write-Log ("Ổ {0} có Size {1:N2}GB nhỏ hơn dung lượng source {2:N2}GB. Bỏ qua." -f $upper, ($disk.Size/1GB), ($sourceSize/1GB)) "WARN" -Drive $upper
             continue
         }
         Write-Log ("Ổ {0} (USB) Size={1:N2}GB, Free={2:N2}GB" -f `
@@ -438,7 +671,7 @@ foreach ($drv in $DestDrives) {
         $ValidTargets += $upper
     }
     else {
-        Write-Log "Ổ $upper KHÔNG phải USB (hoặc không tìm thấy). Bỏ qua." "WARN"
+        Write-Log "Ổ $upper KHÔNG phải USB (hoặc không tìm thấy). Bỏ qua." "WARN" -Drive $upper
     }
 }
 if ($ValidTargets.Count -eq 0) {
@@ -460,13 +693,13 @@ if ($script:RemountScriptIsEmpty -or $script:RemountCacheIsEmpty) {
             & $script:ShellExe -NoProfile -ExecutionPolicy Bypass -File $RemountScriptPath -Mode Capture -Drive $drv -CachePath $RemountCachePath
             $capCode = $LASTEXITCODE
             if ($capCode -eq 0) {
-                Write-Log ("Capture remount OK cho ổ {0}, cache: {1}" -f $drv, $RemountCachePath)
+                Write-Log ("Capture remount OK cho ổ {0}, cache: {1}" -f $drv, $RemountCachePath) -Drive $drv
             } else {
-                Write-Log ("Capture remount cho ổ {0} thất bại (ExitCode={1}). Tiếp tục mà không có cache remount cho ổ này." -f $drv, $capCode) "WARN"
+                Write-Log ("Capture remount cho ổ {0} thất bại (ExitCode={1}). Tiếp tục mà không có cache remount cho ổ này." -f $drv, $capCode) "WARN" -Drive $drv
             }
         }
         catch {
-            Write-Log ("Lỗi khi capture remount ở {0}: {1}" -f $drv, $_) "WARN"
+            Write-Log ("Lỗi khi capture remount ở {0}: {1}" -f $drv, $_) "WARN" -Drive $drv
         }
     }
 } else {
@@ -521,7 +754,7 @@ foreach ($drv in $ValidTargets) {
     $usedMB = $usedBytes / 1MB
     $usedPct = if ($totalSize -gt 0) { $usedBytes / $totalSize } else { 0 }
 
-    Write-Log ("--- ĐÁNH GIÁ Ổ {0} ---" -f $drv)
+    Write-Log ("--- ĐÁNH GIÁ Ổ {0} ---" -f $drv) -Drive $drv
     Write-Log ("Size={0:N2}GB, Free={1:N2}GB, Used={2:N2}MB ({3:P1})" -f `
         ($totalSize / 1GB), ($freeSpace / 1GB), $usedMB, $usedPct)
 
@@ -536,29 +769,29 @@ foreach ($drv in $ValidTargets) {
             $ansKeep = Read-Host "GIỮ NGUYÊN dữ liệu, KHÔNG xóa/format? (Y = giữ, giá trị khác = vẫn xóa/format)"
             if ($ansKeep -and $ansKeep.ToUpper() -eq "Y") {
                 $skipCleanup = $true
-                Write-Log ("Người dùng chọn giữ nguyên dữ liệu trên ổ {0} (không xóa/format vì freeSpace đủ)." -f $drv) "WARN"
+                Write-Log ("Người dùng chọn giữ nguyên dữ liệu trên ổ {0} (không xóa/format vì freeSpace đủ)." -f $drv) "WARN" -Drive $drv
             }
         }
 
         if ($usedMB -lt 20) {
-            Write-Log "Dữ liệu hiện tại trên ổ $drv < 20MB → giữ nguyên, chỉ copy thêm."
+            Write-Log "Dữ liệu hiện tại trên ổ $drv < 20MB → giữ nguyên, chỉ copy thêm." -Drive $drv
             # Không đụng vào dữ liệu; freeSpace vẫn giữ giá trị hiện tại
         }
         else {
-            Write-Log ("CẢNH BÁO: ổ {0} đang có dữ liệu {1:N2}MB." -f $drv, $usedMB) "WARN"
+            Write-Log ("CẢNH BÁO: ổ {0} đang có dữ liệu {1:N2}MB." -f $drv, $usedMB) "WARN" -Drive $drv
 
             if ($skipCleanup) {
-                Write-Log ("Bỏ qua xóa/format ổ {0} theo lựa chọn của người dùng." -f $drv) "WARN"
+                Write-Log ("Bỏ qua xóa/format ổ {0} theo lựa chọn của người dùng." -f $drv) "WARN" -Drive $drv
             }
             elseif ($usedPct -lt 0.2) {
                 # OPTION A: xóa file
-                Write-Log ("Áp dụng OPTION A cho {0}: Xóa toàn bộ file (Used<{1:P0} dung lượng)." -f $drv, 0.2)
+                Write-Log ("Áp dụng OPTION A cho {0}: Xóa toàn bộ file (Used<{1:P0} dung lượng)." -f $drv, 0.2) -Drive $drv
                 try {
                     Get-ChildItem -Path ($drv + "\") -Force | Remove-Item -Recurse -Force -ErrorAction Stop
-                    Write-Log "Đã xóa toàn bộ dữ liệu trên ổ $drv."
+                    Write-Log "Đã xóa toàn bộ dữ liệu trên ổ $drv." -Drive $drv
                     # tùy chọn: chờ ổ ổn định lại
                     if (-not (Wait-DriveReady $drv 15)) {
-                        Write-Log "Sau khi xóa dữ liệu, ổ $drv có vẻ không ổn định. BỎ QUA ổ này." "ERROR"
+                        Write-Log "Sau khi xóa dữ liệu, ổ $drv có vẻ không ổn định. BỎ QUA ổ này." "ERROR" -Drive $drv
                         continue
                     }
                     # Reload thông tin disk
@@ -567,85 +800,42 @@ foreach ($drv in $ValidTargets) {
                     $freeSpace = [double]$disk.FreeSpace
                 }
                 catch {
-                    Write-Log "Lỗi khi xóa dữ liệu trên ổ ${drv}: $_" "ERROR"
+                    Write-Log "Lỗi khi xóa dữ liệu trên ổ ${drv}: $_" "ERROR" -Drive $drv
                     continue
                 }
             }
             else {
-                # OPTION B: quick format FAT32
-                # Nếu không AutoYes: kiểm tra nhanh ổ đích đã khớp source chưa (không hash)
-                if (-not $AutoYes -and (Test-Path $CheckScriptPath)) {
-                    Write-Log ("Kiểm tra nhanh ổ {0} trước khi format..." -f $drv)
-                    $quickArgs = @(
-                        "-NoProfile", "-ExecutionPolicy", "Bypass",
-                        "-File", $CheckScriptPath,
-                        "-SourceRoot", $SourceRoot,
-                        "-DestDrives", $drv,
-                        "-NoConfirm",
-                        "-NoPause",
-                        "-HashLastN", "0"
-                    )
-                    if ($LogFile) { $quickArgs += @("-LogFile", $LogFile) }
-                    & $script:ShellExe @quickArgs
-                    $quickCode = $LASTEXITCODE
-                    $mirrorCopy = $false
-                    switch ($quickCode) {
-                        0 {
-                            Write-Log ("Ổ {0} hiện đã khớp với source (check nhanh, không hash). Bỏ qua format, tiếp tục copy bình thường." -f $drv) "WARN"
-                            $skipCleanup = $true
-                        }
-                        2 {
-                            Write-Log ("Check nhanh ổ {0} phát hiện sai khác size/hash (ExitCode=2). Bỏ qua format, tiếp tục copy bình thường." -f $drv) "WARN"
-                            $skipCleanup = $true
-                        }
-                        4 {
-                            Write-Log ("Check nhanh ổ {0} phát hiện thiếu file (ExitCode=4). Bỏ qua format, tiếp tục copy bình thường." -f $drv) "WARN"
-                            $skipCleanup = $true
-                        }
-                        3 {
-                            Write-Log ("Check nhanh ổ {0} phát hiện DEST thừa file (ExitCode=3). Bỏ qua format, copy kiểu MIRROR để xóa file dư." -f $drv) "WARN"
-                            $skipCleanup = $true
-                            $mirrorCopy = $true
-                        }
-                        Default {
-                            Write-Log ("Check nhanh trước format ổ {0} báo ExitCode={1}, tiếp tục format." -f $drv, $quickCode) "WARN"
-                        }
-                    }
-                    if ($mirrorCopy -and ($MirrorTargets -notcontains $drv)) {
-                        $MirrorTargets += $drv
-                    }
+                $sizeMB = [double]($totalSize / 1MB)
+                $useFat16 = ($sizeMB -lt 4000)
+                $fsType = if ($useFat16) { "FAT16" } else { "FAT32" }
+                $clusterSize = if ($useFat16) { 16384 } else { 32768 }
+
+                # Windows th??ng khong cho FAT32 > 32GB
+                if ((-not $useFat16) -and ($totalSize -gt 32GB)) {
+                    Write-Log ("? {0} > 32GB, th??ng khong format FAT32 ???c tren Windows. B? QUA ? nay." -f $drv) "ERROR" -Drive $drv
+                    continue
                 }
 
-                if ($skipCleanup) {
-                    if ($freeSpace -lt $sourceSize) { $freeSpace = [double]$totalSize }
-                }
-                else {
-                    # Windows thường không cho FAT32 > 32GB
-                    if ($totalSize -gt 32GB) {
-                        Write-Log ("Ổ {0} > 32GB, thường không format FAT32 được trên Windows. BỎ QUA ổ này." -f $drv) "ERROR"
+                try {
+                    $letter = $drv.TrimEnd(':')
+                    Write-Log ("Dang format {0} (cluster {1}KB) o {2}..." -f $fsType, ($clusterSize / 1KB), $drv) "WARN" -Drive $drv
+                    Format-Volume -DriveLetter $letter -FileSystem $fsType -AllocationUnitSize $clusterSize -NewFileSystemLabel "USB_$letter" -Confirm:$false -Force -ErrorAction Stop
+                    Write-Log ("Da quick format {0} (cluster {1}KB) o {2}." -f $fsType, ($clusterSize / 1KB), $drv) -Drive $drv
+
+                    # Cho ? mount l?i
+                    if (-not (Wait-DriveReady $drv 30)) {
+                        Write-Log "Sau khi format, ? $drv khong ready trong 30s. B? QUA ? nay." "ERROR" -Drive $drv
                         continue
                     }
 
-                    try {
-                        $letter = $drv.TrimEnd(':')
-                        Write-Log ("Đang format FAT32 ổ {0}..." -f $drv) "WARN"
-                        Format-Volume -DriveLetter $letter -FileSystem FAT32 -NewFileSystemLabel "USB_$letter" -Confirm:$false -Force -ErrorAction Stop
-                        Write-Log "Đã quick format FAT32 ổ $drv."
-
-                        # Cho ổ mount lại
-                        if (-not (Wait-DriveReady $drv 30)) {
-                            Write-Log "Sau khi format, ổ $drv không ready trong 30s. BỎ QUA ổ này." "ERROR"
-                            continue
-                        }
-
-                        $disk = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='{0}'" -f $drv)
-                        $totalSize = [double]$disk.Size
-                        $freeSpace = [double]$disk.FreeSpace
-                    }
-                    catch {
-                        Write-Log "Lỗi khi format ổ ${drv}: $_" "ERROR"
-                        continue
-                    }
+                    $disk = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='{0}'" -f $drv)
+                    $totalSize = [double]$disk.Size
+                    $freeSpace = [double]$disk.FreeSpace
+                }
+                catch {
+                    Write-Log "Lỗi khi format ổ ${drv}: $_" "ERROR" -Drive $drv
+                    continue
+                }
                 }
             }
         }
@@ -657,7 +847,7 @@ foreach ($drv in $ValidTargets) {
             continue
         }
 
-        Write-Log ("Ổ {0} đủ điều kiện để copy." -f $drv)
+        Write-Log ("Ổ {0} đủ điều kiện để copy." -f $drv) -Drive $drv
         $PreparedTargets += $drv
     }
 }
@@ -675,9 +865,9 @@ function Start-CopyProcess {
     )
 
     if (-not (Wait-DriveReady $DriveLetter 30)) {
-        Write-Log ("Ổ {0} KHÔNG ready trước khi copy." -f $DriveLetter) "ERROR"
+        Write-Log ("Ổ {0} KHÔNG ready trước khi copy." -f $DriveLetter) "ERROR" -Drive $DriveLetter
         if (Try-RemountDrive -DriveLetter $DriveLetter -WaitSec 30) {
-            Write-Log ("Ổ {0} đã remount, tiếp tục copy." -f $DriveLetter) "WARN"
+            Write-Log ("Ổ {0} đã remount, tiếp tục copy." -f $DriveLetter) "WARN" -Drive $DriveLetter
         } else {
             return $null
         }
@@ -690,13 +880,16 @@ function Start-CopyProcess {
         }
     }
     catch {
-        Write-Log "Lỗi khi tạo thư mục đích $destPath trên ổ ${DriveLetter}: $_" "ERROR"
+        Write-Log "Lỗi khi tạo thư mục đích $destPath trên ổ ${DriveLetter}: $_" "ERROR" -Drive $DriveLetter
         return $null
     }
 
     $srcArg = Quote-PathArg $SourceRoot
     $dstArg = Quote-PathArg $destPath
     $modeSwitch = if ($UseMirror) { "/MIR" } else { "/E" }
+    $driveLog = Get-DriveLogFile -Drive $DriveLetter
+    if (-not $driveLog) { $driveLog = $script:LogFile }
+    $logArg = "/LOG+:" + (Quote-PathArg $driveLog)
 
     $params = @(
         $srcArg,
@@ -704,7 +897,7 @@ function Start-CopyProcess {
         $modeSwitch,
         "/R:2",
         "/W:2",
-        "/LOG+:$LogFile",
+        $logArg,
         "/NFL",
         "/NDL",
         "/NP",
@@ -723,15 +916,16 @@ function Start-CopyProcess {
     # /MT:16: copy đa luồng (16 luồng)
 
     if ($UseMirror) {
-        Write-Log ("Copy ổ {0} chạy MIRROR (do quick check ExitCode=3)." -f $DriveLetter) "WARN"
+        Write-Log ("Copy ổ {0} chạy MIRROR (do quick check ExitCode=3)." -f $DriveLetter) "WARN" -Drive $DriveLetter
     }
 
-    Write-Log ("Chạy robocopy tới {0}: robocopy {1}" -f $DriveLetter, ($params -join ' '))
+    Write-Log ("Chạy robocopy tới {0}: robocopy {1}" -f $DriveLetter, ($params -join ' ')) -Drive $DriveLetter
     $p = Start-Process -FilePath "robocopy.exe" -ArgumentList ($params -join ' ') -PassThru -WindowStyle Hidden
     return [PSCustomObject]@{
         Drive     = $DriveLetter
         Process   = $p
         UseMirror = $UseMirror
+        LogPath   = $driveLog
     }
 }
 
@@ -745,17 +939,20 @@ function Invoke-PostCopyFlow {
         Success = $true
         Stage   = ""
         Code    = 0
+        Message = ""
     }
 
     if (-not (Test-Path $CheckScriptPath)) {
-        Write-Log ("Không tìm thấy script CHECK: {0}. Dừng flow ở {1}." -f $CheckScriptPath, $DriveLetter) "ERROR"
+        Write-Log ("Không tìm thấy script CHECK: {0}. Dừng flow ở {1}." -f $CheckScriptPath, $DriveLetter) "ERROR" -Drive $DriveLetter
         $result.Success = $false
         $result.Stage = "CHECK"
         $result.Code = 1
+        $result.Message = "Check script not found."
         return $result
     }
 
-    Write-Log ("BẮT ĐẦU BƯỚC CHECK cho ổ {0}..." -f $DriveLetter)
+    Write-Log ("BẮT ĐẦU BƯỚC CHECK cho ổ {0}..." -f $DriveLetter) -Drive $DriveLetter
+    $driveLog = Get-DriveLogFile -Drive $DriveLetter
     $checkScriptFull = [System.IO.Path]::GetFullPath($CheckScriptPath)
     $checkArgs = @(
         "-NoProfile", "-ExecutionPolicy", "Bypass",
@@ -764,78 +961,87 @@ function Invoke-PostCopyFlow {
         "-DestDrives", $DriveLetter,
         "-NoConfirm",
         "-NoPause",
-        "-LogFile", $LogFile,
+        "-LogFile", $driveLog,
         "-HashLastN", $HashLastN,
         "-HashAlgorithm", $HashAlgorithm
     )
     if ($EnableHash) { $checkArgs += "-Hash" }
-    Write-Log ("CMD CHECK ({0}): {1} {2}" -f $DriveLetter, $script:ShellExe, ($checkArgs -join " "))
+    Write-Log ("CMD CHECK ({0}): {1} {2}" -f $DriveLetter, $script:ShellExe, ($checkArgs -join " ")) -Drive $DriveLetter
     & $script:ShellExe @checkArgs
     $checkCode = $LASTEXITCODE
+    $checkMsg = Get-CheckExitMessage -Code $checkCode
     if ($checkCode -ne 0) {
-        Write-Log ("BƯỚC CHECK lỗi cho ổ {0} (ExitCode={1}). Dừng flow ở ổ này." -f $DriveLetter, $checkCode) "ERROR"
+        Write-Log ("CHECK detail: {0}" -f $checkMsg) "ERROR" -Drive $DriveLetter
+        Write-Log ("BƯỚC CHECK lỗi cho ổ {0} (ExitCode={1}). Dừng flow ở ổ này." -f $DriveLetter, $checkCode) "ERROR" -Drive $DriveLetter
         $result.Success = $false
         $result.Stage = "CHECK"
         $result.Code = $checkCode
+        $result.Message = $checkMsg
         return $result
     }
-    Write-Log ("BƯỚC CHECK hoàn tất cho ổ {0}." -f $DriveLetter)
+    Write-Log ("BƯỚC CHECK hoàn tất cho ổ {0}." -f $DriveLetter) -Drive $DriveLetter
 
     if ($CheckAndSort) {
         if (-not (Test-Path $SortScriptPath)) {
-            Write-Log ("Không tìm thấy script SORT: {0}. Dừng flow ở {1}." -f $SortScriptPath, $DriveLetter) "ERROR"
+            Write-Log ("Không tìm thấy script SORT: {0}. Dừng flow ở {1}." -f $SortScriptPath, $DriveLetter) "ERROR" -Drive $DriveLetter
             $result.Success = $false
             $result.Stage = "SORT"
             $result.Code = 1
+            $result.Message = "Sort script not found."
             return $result
         }
-
-        Write-Log ("BẮT ĐẦU BƯỚC SORT cho ổ {0}..." -f $DriveLetter)
+        Write-Log ("BẮT ĐẦU BƯỚC SORT cho ổ {0}..." -f $DriveLetter) -Drive $DriveLetter
         $sortScriptFull = [System.IO.Path]::GetFullPath($SortScriptPath)
         $deviceArg = $DriveLetter.ToLower()
         $sortArgs = @(
             "-NoProfile", "-ExecutionPolicy", "Bypass",
             "-File", $sortScriptFull,
             "-Device", $deviceArg,
-            "-Mode", "CheckAndSort"
+            "-Mode", "CheckAndSort",
+            "-Force"
         )
-        Write-Log ("CMD SORT ({0}): {1} {2}" -f $DriveLetter, $script:ShellExe, ($sortArgs -join " "))
+        Write-Log ("CMD SORT ({0}): {1} {2}" -f $DriveLetter, $script:ShellExe, ($sortArgs -join " ")) -Drive $DriveLetter
         & $script:ShellExe @sortArgs
         $sortCode = $LASTEXITCODE
-        if ($sortCode -ne 0) {
-            Write-Log ("BƯỚC SORT lỗi cho ổ {0} (ExitCode={1}). Dừng flow ở ổ này." -f $DriveLetter, $sortCode) "ERROR"
+        $sortMsg = Get-SortExitMessage -Code $sortCode
+        if ($sortCode -ne 0 -and $sortCode -ne 2) {
+            Write-Log ("SORT detail: {0}" -f $sortMsg) "ERROR" -Drive $DriveLetter
+            Write-Log ("BƯỚC SORT lỗi cho ổ {0} (ExitCode={1}). Dừng flow ở ổ này." -f $DriveLetter, $sortCode) "ERROR" -Drive $DriveLetter
             $result.Success = $false
             $result.Stage = "SORT"
             $result.Code = $sortCode
+            $result.Message = $sortMsg
             return $result
         }
-        Write-Log ("BƯỚC SORT hoàn tất cho ổ {0}." -f $DriveLetter)
+        Write-Log ("SORT detail: {0}" -f $sortMsg) -Drive $DriveLetter
+        Write-Log ("BƯỚC SORT hoàn tất cho ổ {0}." -f $DriveLetter) -Drive $DriveLetter
     }
 
     if ($script:SkipEjectEffective) {
-        Write-Log ("Bỏ qua bước EJECT cho ổ {0} (SkipEject)." -f $DriveLetter) "WARN"
+        Write-Log ("Bỏ qua bước EJECT cho ổ {0} (SkipEject)." -f $DriveLetter) "WARN" -Drive $DriveLetter
         return $result
     }
     if (-not (Test-Path $EjectScriptPath)) {
-        Write-Log ("Không tìm thấy script EJECT: {0}. Bỏ qua EJECT cho ổ {1}." -f $EjectScriptPath, $DriveLetter) "WARN"
+        Write-Log ("Không tìm thấy script EJECT: {0}. Bỏ qua EJECT cho ổ {1}." -f $EjectScriptPath, $DriveLetter) "WARN" -Drive $DriveLetter
         return $result
     }
 
-    Write-Log ("BẮT ĐẦU BƯỚC EJECT cho ổ {0}..." -f $DriveLetter)
+    Write-Log ("BẮT ĐẦU BƯỚC EJECT cho ổ {0}..." -f $DriveLetter) -Drive $DriveLetter
     $ejectScriptFull = [System.IO.Path]::GetFullPath($EjectScriptPath)
     $drvArg = $DriveLetter.ToLower()
     $argListEject = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $ejectScriptFull, $drvArg)
-    Write-Log ("CMD EJECT ({0}): {1} {2}" -f $DriveLetter, $script:ShellExe, ($argListEject -join " "))
+    Write-Log ("CMD EJECT ({0}): {1} {2}" -f $DriveLetter, $script:ShellExe, ($argListEject -join " ")) -Drive $DriveLetter
     & $script:ShellExe @argListEject
     $ejectCode = $LASTEXITCODE
     if ($ejectCode -ne 0) {
-        Write-Log ("BƯỚC EJECT lỗi cho ổ {0} (ExitCode={1})." -f $DriveLetter, $ejectCode) "ERROR"
+        Write-Log ("BƯỚC EJECT lỗi cho ổ {0} (ExitCode={1})." -f $DriveLetter, $ejectCode) "ERROR" -Drive $DriveLetter
         $result.Success = $false
         $result.Stage = "EJECT"
         $result.Code = $ejectCode
+        $result.Message = "Eject failed."
         return $result
     }
-    Write-Log ("BƯỚC EJECT hoàn tất cho ổ {0}." -f $DriveLetter)
+    Write-Log ("BƯỚC EJECT hoàn tất cho ổ {0}." -f $DriveLetter) -Drive $DriveLetter
 
     return $result
 }
@@ -862,6 +1068,7 @@ foreach ($drv in $PreparedTargets) {
             Success = $false
             Stage   = "COPY"
             Code    = 999
+            Message = "Failed to start robocopy."
         }
     }
     Start-Sleep -Milliseconds 300
@@ -876,17 +1083,36 @@ while ($active.Count -gt 0) {
         Start-Sleep -Seconds 1
     }
 
+    foreach ($item in @($active)) {
+        $drv = $item.Drive
+        if (-not $script:EarlyCopyErrors.ContainsKey($drv)) {
+            $newLines = Read-NewLogLines -Drive $drv
+            $errInfo = Get-RobocopyErrorFromLines -Lines $newLines
+            if ($errInfo) {
+                $script:EarlyCopyErrors[$drv] = $errInfo
+                $detail = Format-RobocopyErrorMessage -ErrorInfo $errInfo
+                Write-Log ("COPY toi {0} phat hien loi robocopy, dung som. {1}" -f $drv, $detail) "ERROR" -Drive $drv
+                try { Stop-Process -Id $item.Process.Id -Force -ErrorAction SilentlyContinue } catch { }
+            }
+        }
+    }
+
     $doneSet = $active | Where-Object { $_.Process.HasExited }
     if (-not $doneSet) { continue }
 
     foreach ($done in @($doneSet)) {
         $drv = $done.Drive
         $code = $done.Process.ExitCode
+        $earlyErr = $null
+        if ($script:EarlyCopyErrors.ContainsKey($drv)) { $earlyErr = $script:EarlyCopyErrors[$drv] }
+        $copyMsg = if ($earlyErr) { Format-RobocopyErrorMessage -ErrorInfo $earlyErr } else { Get-RobocopyExitMessage -Code $code }
+        $isFailure = $false
+        if ($earlyErr) { $isFailure = $true } elseif ($code -ge 8) { $isFailure = $true }
         $copyResults[$drv] = $code
         $active = $active | Where-Object { $_.Process.Id -ne $done.Process.Id }
 
-        if ($code -lt 8) {
-            Write-Log ("COPY toi {0} HOAN TAT. ExitCode={1}" -f $drv, $code)
+        if (-not $isFailure) {
+            Write-Log ("COPY toi {0} HOAN TAT. ExitCode={1}. {2}" -f $drv, $code, $copyMsg) -Drive $drv
             $flowResult = Invoke-PostCopyFlow -DriveLetter $drv
             if (-not $flowResult.Success) {
                 $flowErrors[$drv] = $flowResult
@@ -894,31 +1120,32 @@ while ($active.Count -gt 0) {
             continue
         }
 
-        Write-Log ("COPY toi {0} THAT BAI. ExitCode={1}" -f $drv, $code) "ERROR"
+        Write-Log ("COPY toi {0} THAT BAI. ExitCode={1}. {2}" -f $drv, $code, $copyMsg) "ERROR" -Drive $drv
         if ($AutoYes) {
-            Write-Log "AutoYes đang bật -> không thử lại copy cho ổ này." "ERROR"
+            Write-Log "AutoYes đang bật -> không thử lại copy cho ổ này." "ERROR" -Drive $drv
             $flowErrors[$drv] = [PSCustomObject]@{
                 Drive   = $drv
                 Success = $false
                 Stage   = "COPY"
                 Code    = $code
+                Message = $copyMsg
             }
             continue
         }
 
         $stillThere = Test-Path ($drv + "\\")
         if (-not $stillThere) {
-            Write-Log ("Ổ {0} không còn sẵn sàng (có thể bị rút). Thử remount..." -f $drv) "ERROR"
+            Write-Log ("Ổ {0} không còn sẵn sàng (có thể bị rút). Thử remount..." -f $drv) "ERROR" -Drive $drv
             $remounted = Try-RemountDrive -DriveLetter $drv -WaitSec 30
             if ($remounted) {
-                Write-Log ("Remount ổ {0} thành công, thử copy lại..." -f $drv) "WARN"
+                Write-Log ("Remount ổ {0} thành công, thử copy lại..." -f $drv) "WARN" -Drive $drv
                 $retryProc = Start-CopyProcess -DriveLetter $drv -UseMirror ($MirrorTargets -contains $drv) -ThreadNo $threadNo
                 if ($retryProc) {
                     $copyResults.Remove($drv) | Out-Null
                     $active += $retryProc
                     continue
                 } else {
-                    Write-Log ("Khởi động copy lại ổ {0} sau remount thất bại." -f $drv) "ERROR"
+                    Write-Log ("Khởi động copy lại ổ {0} sau remount thất bại." -f $drv) "ERROR" -Drive $drv
                 }
             }
         }
@@ -926,37 +1153,40 @@ while ($active.Count -gt 0) {
         $ans = Read-Host ("Ổ {0} gặp lỗi (ExitCode={1}). Cắm lại/Remount nếu đã rút, nhập Y để thử copy lại, phím khác = bỏ qua ổ này" -f $drv, $code)
         if ($ans -and $ans.ToUpper() -eq 'Y') {
             if (-not (Wait-DriveReady $drv 60)) {
-                Write-Log ("Ổ {0} vẫn không sẵn sàng sau 60s. Bỏ qua ổ này." -f $drv) "ERROR"
+                Write-Log ("Ổ {0} vẫn không sẵn sàng sau 60s. Bỏ qua ổ này." -f $drv) "ERROR" -Drive $drv
                 $flowErrors[$drv] = [PSCustomObject]@{
                     Drive   = $drv
                     Success = $false
                     Stage   = "COPY"
                     Code    = $code
+                    Message = $copyMsg
                 }
                 continue
             }
-            Write-Log ("Thử copy lại ổ {0}..." -f $drv)
+            Write-Log ("Thử copy lại ổ {0}..." -f $drv) -Drive $drv
             $retryProc = Start-CopyProcess -DriveLetter $drv -UseMirror ($MirrorTargets -contains $drv) -ThreadNo $threadNo
             if ($retryProc) {
                 $copyResults.Remove($drv) | Out-Null
                 $active += $retryProc
             } else {
-                Write-Log ("Khởi động copy lại ổ {0} thất bại, giữ nguyên lỗi trước đó." -f $drv) "ERROR"
+                Write-Log ("Khởi động copy lại ổ {0} thất bại, giữ nguyên lỗi trước đó." -f $drv) "ERROR" -Drive $drv
                 $flowErrors[$drv] = [PSCustomObject]@{
                     Drive   = $drv
                     Success = $false
                     Stage   = "COPY"
                     Code    = $code
+                    Message = $copyMsg
                 }
             }
         }
         else {
-            Write-Log ("Người dùng chọn bỏ qua copy cho ổ {0}." -f $drv) "WARN"
+            Write-Log ("Người dùng chọn bỏ qua copy cho ổ {0}." -f $drv) "WARN" -Drive $drv
             $flowErrors[$drv] = [PSCustomObject]@{
                 Drive   = $drv
                 Success = $false
                 Stage   = "COPY"
                 Code    = $code
+                Message = $copyMsg
             }
         }
     }
@@ -969,6 +1199,9 @@ if ($flowErrors.Count -gt 0) {
     foreach ($k in $flowErrors.Keys) {
         $e = $flowErrors[$k]
         Write-Log (" - {0}: Lỗi {1} (ExitCode={2})" -f $k, $e.Stage, $e.Code) "ERROR"
+        if ($e.Message) {
+            Write-Log ("   detail: {0}" -f $e.Message) "ERROR" -Drive $k
+        }
     }
     $overallExitCode = 1
 } else {
@@ -977,7 +1210,7 @@ if ($flowErrors.Count -gt 0) {
 
 Write-Log "===== QUY TRÌNH HOÀN THÀNH ====="
 Write-Host ""
-Write-Host "Log file: $LogFile" -ForegroundColor Cyan
+Write-Host "Log file: $script:LogFile" -ForegroundColor Cyan
 if ($overallExitCode -ne 0) {
 	pause 
 	exit $overallExitCode
