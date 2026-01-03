@@ -18,10 +18,10 @@ param(
 
 
     # Tham số cho bước CHECK
-    [switch]$EnableHash,       # bật check hash
+    [switch]$EnableHash = $true,       # bật check hash
     [int]$HashLastN = 100,     # số file cuối cùng để hash (0 = hash toàn bộ)
     [ValidateSet('CRC32', 'MD5', 'SHA256')]
-    [string]$HashAlgorithm = 'CRC32',
+    [string]$HashAlgorithm = 'MD5',
 
     # Đường dẫn script EJECT
     [string]$EjectScriptPath = ".\removedrv.ps1",

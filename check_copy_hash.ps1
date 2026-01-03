@@ -14,7 +14,7 @@
 
     # Thuật toán hash
     [ValidateSet('CRC32','MD5','SHA256')]
-    [string]$HashAlgorithm = 'CRC32',
+    [string]$HashAlgorithm = 'MD5',
 
     # Hiển thị hướng dẫn
     [switch]$h,
@@ -70,7 +70,7 @@ function Show-Help {
     Write-Host "  -HashLastN  <N>          : Khi có -Hash:"
     Write-Host "                             =0  → hash toàn bộ file chung."
     Write-Host "                             >0  → chỉ hash N file cuối cùng."
-    Write-Host "  -HashAlgorithm CRC32|MD5|SHA256: Thu?t toan hash (m?c ??nh CRC32)."
+    Write-Host "  -HashAlgorithm CRC32|MD5|SHA256: Thu?t toan hash (m?c ??nh MD5)."
     Write-Host "  -NoConfirm               : Không hỏi lại cấu hình."
     Write-Host "  -NoPause                 : Không chờ Enter cuối script."
     Write-Host "  -LogFile     <path>      : Ghi log vào file chỉ định."
@@ -199,44 +199,236 @@ foreach ($drv in $DestDrives) {
         function Get-Crc32Table {
             $table = New-Object 'uint32[]' 256
             for ($i = 0; $i -lt 256; $i++) {
-                $crc = [uint32]$i
+                $crc = $i
                 for ($j = 0; $j -lt 8; $j++) {
                     if (($crc -band 1) -ne 0) {
-                        $crc = [uint32]0xEDB88320 -bxor ($crc -shr 1)
+                        $crc = Mask-Crc32 (($crc -shr 1) -bxor 0xEDB88320)
                     } else {
-                        $crc = $crc -shr 1
+                        $crc = Mask-Crc32 ($crc -shr 1)
                     }
                 }
-                $table[$i] = $crc
+                $table[$i] = [uint32]$crc
             }
             return $table
         }
 
-        function Get-FileCrc32 {
-            param([string]$Path)
+        function Mask-Crc32 {
+            param([long]$Value)
 
-            if (-not $script:Crc32Table) {
+            if ($Value -lt 0) {
+                $Value = $Value + 0x100000000
+            }
+            return [uint32]([uint64]$Value -band 0xFFFFFFFF)
+        }
+
+        function Normalize-Crc32 {
+            param([long]$Value)
+
+            return Mask-Crc32 $Value
+        }
+
+        function Ensure-Crc32SampleHelper {
+            $type = [System.Type]::GetType('CopyUsb.Crc32Sample', $false, $false)
+            if ($type) { return $true }
+
+            foreach ($asm in [System.AppDomain]::CurrentDomain.GetAssemblies()) {
+                $type = $asm.GetType('CopyUsb.Crc32Sample', $false, $false)
+                if ($type) { return $true }
+            }
+
+            $code = @'
+using System;
+using System.IO;
+
+namespace CopyUsb {
+    public static class Crc32Sample {
+        private static readonly uint[] Table = InitTable();
+
+        private static uint[] InitTable() {
+            var table = new uint[256];
+            for (uint i = 0; i < 256; i++) {
+                uint crc = i;
+                for (int j = 0; j < 8; j++) {
+                    if ((crc & 1) != 0) {
+                        crc = 0xEDB88320u ^ (crc >> 1);
+                    } else {
+                        crc >>= 1;
+                    }
+                }
+                table[i] = crc;
+            }
+            return table;
+        }
+
+        private static uint Update(uint crc, byte[] buffer, int count) {
+            for (int i = 0; i < count; i++) {
+                crc = Table[(crc ^ buffer[i]) & 0xFF] ^ (crc >> 8);
+            }
+            return crc;
+        }
+
+        public static string ComputeSample(string path, int sampleSize) {
+            if (sampleSize <= 0) { sampleSize = 65536; }
+            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read)) {
+                long length = fs.Length;
+                long[] offsets;
+                int[] sizes;
+                if (length <= sampleSize * 2L) {
+                    offsets = new long[] { 0 };
+                    sizes = new int[] { (int)length };
+                } else if (length < sampleSize * 3L) {
+                    offsets = new long[] { 0, length - sampleSize };
+                    sizes = new int[] { sampleSize, sampleSize };
+                } else {
+                    long mid = (length / 2) - (sampleSize / 2);
+                    if (mid < 0) mid = 0;
+                    offsets = new long[] { 0, mid, length - sampleSize };
+                    sizes = new int[] { sampleSize, sampleSize, sampleSize };
+                }
+
+                uint crc = 0xFFFFFFFFu;
+                var buffer = new byte[8192];
+                for (int r = 0; r < offsets.Length; r++) {
+                    fs.Seek(offsets[r], SeekOrigin.Begin);
+                    int remaining = sizes[r];
+                    while (remaining > 0) {
+                        int toRead = Math.Min(buffer.Length, remaining);
+                        int read = fs.Read(buffer, 0, toRead);
+                        if (read <= 0) break;
+                        crc = Update(crc, buffer, read);
+                        remaining -= read;
+                    }
+                }
+
+                crc = ~crc;
+                return crc.ToString("X8");
+            }
+        }
+    }
+}
+'@
+            try {
+                Add-Type -TypeDefinition $code -Language CSharp -ErrorAction Stop | Out-Null
+                return $true
+            } catch {
+                return $false
+            }
+        }
+
+        function Update-Crc32Buffer {
+            param(
+                [long]$Crc,
+                [byte[]]$Buffer,
+                [int]$Count
+            )
+
+
+            $Crc = Normalize-Crc32 $Crc
+            if (-not (Get-Variable -Name Crc32Table -Scope Script -ErrorAction SilentlyContinue)) {
                 $script:Crc32Table = Get-Crc32Table
             }
 
-            $crc = [uint32]0xFFFFFFFF
-            $fs = [System.IO.File]::OpenRead($Path)
-            try {
-                $buffer = New-Object byte[] 8192
-                while (($read = $fs.Read($buffer, 0, $buffer.Length)) -gt 0) {
-                    for ($i = 0; $i -lt $read; $i++) {
-                        $idx = ($crc -bxor $buffer[$i]) -band 0xFF
-                        $crc = $script:Crc32Table[$idx] -bxor ($crc -shr 8)
-                    }
-                }
+            for ($i = 0; $i -lt $Count; $i++) {
+                $idx = [int](($Crc -bxor $Buffer[$i]) -band 0xFF)
+                $Crc = Mask-Crc32 ($script:Crc32Table[$idx] -bxor ($Crc -shr 8))
             }
-            finally {
-                $fs.Dispose()
+            return Mask-Crc32 $Crc
+        }
+
+        function Get-HashSampleRanges {
+            param(
+                [long]$Length,
+                [int]$SampleSize
+            )
+
+            if ($Length -le ($SampleSize * 2)) {
+                return @([PSCustomObject]@{ Offset = 0; Length = [int]$Length })
             }
 
-            $crc = -bnot $crc
-            $crc = $crc -band 0xFFFFFFFF
-            return $crc.ToString("X8")
+            if ($Length -lt ($SampleSize * 3)) {
+                return @(
+                    [PSCustomObject]@{ Offset = 0; Length = $SampleSize },
+                    [PSCustomObject]@{ Offset = [long]($Length - $SampleSize); Length = $SampleSize }
+                )
+            }
+
+            $mid = [long]([math]::Floor($Length / 2) - [math]::Floor($SampleSize / 2))
+            if ($mid -lt 0) { $mid = 0 }
+            return @(
+                [PSCustomObject]@{ Offset = 0; Length = $SampleSize },
+                [PSCustomObject]@{ Offset = $mid; Length = $SampleSize },
+                [PSCustomObject]@{ Offset = [long]($Length - $SampleSize); Length = $SampleSize }
+            )
+        }
+
+        function New-HashAlgorithmInstance {
+            param([string]$Algorithm)
+
+            $algo = [System.Security.Cryptography.HashAlgorithm]::Create($Algorithm)
+            if (-not $algo) {
+                throw "Unsupported hash algorithm: $Algorithm"
+            }
+            return $algo
+        }
+
+        function Get-FileSampleHash {
+            param(
+                [string]$Path,
+                [string]$Algorithm,
+                [int]$SampleSize
+            )
+
+
+            if ($Algorithm -eq 'CRC32') {
+                if (Ensure-Crc32SampleHelper) {
+                    return [CopyUsb.Crc32Sample]::ComputeSample($Path, $SampleSize)
+                }
+            }
+            $fs = [System.IO.File]::OpenRead($Path)
+            $algo = $null
+            try {
+                $ranges = Get-HashSampleRanges -Length $fs.Length -SampleSize $SampleSize
+                if ($Algorithm -eq 'CRC32') {
+                    if (-not (Get-Variable -Name Crc32Table -Scope Script -ErrorAction SilentlyContinue)) {
+                        $script:Crc32Table = Get-Crc32Table
+                    }
+                    $crc = Normalize-Crc32 0xFFFFFFFF
+                    $buffer = New-Object byte[] 8192
+                    foreach ($range in $ranges) {
+                        [void]$fs.Seek($range.Offset, [System.IO.SeekOrigin]::Begin)
+                        $remaining = [int]$range.Length
+                        while ($remaining -gt 0) {
+                            $toRead = [math]::Min($buffer.Length, $remaining)
+                            $read = $fs.Read($buffer, 0, $toRead)
+                            if ($read -le 0) { break }
+                            $crc = Update-Crc32Buffer -Crc $crc -Buffer $buffer -Count $read
+                            $remaining -= $read
+                        }
+                    }
+                    $crc = Mask-Crc32 (-bnot $crc)
+                    return $crc.ToString("X8")
+                }
+
+                $algo = New-HashAlgorithmInstance -Algorithm $Algorithm
+                $buffer = New-Object byte[] 8192
+                foreach ($range in $ranges) {
+                    [void]$fs.Seek($range.Offset, [System.IO.SeekOrigin]::Begin)
+                    $remaining = [int]$range.Length
+                    while ($remaining -gt 0) {
+                        $toRead = [math]::Min($buffer.Length, $remaining)
+                        $read = $fs.Read($buffer, 0, $toRead)
+                        if ($read -le 0) { break }
+                        $null = $algo.TransformBlock($buffer, 0, $read, $null, 0)
+                        $remaining -= $read
+                    }
+                }
+                $null = $algo.TransformFinalBlock([byte[]]::new(0), 0, 0)
+                return ([System.BitConverter]::ToString($algo.Hash) -replace '-', '')
+            }
+            finally {
+                if ($algo) { $algo.Dispose() }
+                $fs.Dispose()
+            }
         }
 
         $summary = [PSCustomObject]@{
@@ -464,6 +656,8 @@ foreach ($drv in $DestDrives) {
 
         $hashMismatch = @()
         $srcHashCache = @{}
+        $hashSampleSize = 65536
+        Write-LogLocal ("[$drv] Hash: sample 2-3 segments (start/middle/end), {0}KB each." -f ($hashSampleSize / 1KB))
         $total        = $filesToHash.Count
         $summary.HashCheckedCount = $total
 
@@ -474,18 +668,10 @@ foreach ($drv in $DestDrives) {
 
             try {
                 if (-not $srcHashCache.ContainsKey($item.Src)) {
-                    if ($HashAlgorithm -eq 'CRC32') {
-                        $srcHashCache[$item.Src] = Get-FileCrc32 -Path $item.Src
-                    } else {
-                        $srcHashCache[$item.Src] = (Get-FileHash -Path $item.Src -Algorithm $HashAlgorithm).Hash
-                    }
+                    $srcHashCache[$item.Src] = Get-FileSampleHash -Path $item.Src -Algorithm $HashAlgorithm -SampleSize $hashSampleSize
                 }
                 $srcHash = $srcHashCache[$item.Src]
-                if ($HashAlgorithm -eq 'CRC32') {
-                    $dstHash = Get-FileCrc32 -Path $item.Dst
-                } else {
-                    $dstHash = (Get-FileHash -Path $item.Dst -Algorithm $HashAlgorithm).Hash
-                }
+                $dstHash = Get-FileSampleHash -Path $item.Dst -Algorithm $HashAlgorithm -SampleSize $hashSampleSize
             }
             catch {
                 Write-LogLocal "[$drv] Lỗi hash file: $rel - $_" "ERROR"
