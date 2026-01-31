@@ -3,7 +3,7 @@
   - Purpose: Act as Codex in this repo; follow user requests while respecting safety and sandbox constraints.
   - Shell: Default to PowerShell (`pwsh`/`powershell`); keep commands compatible with Windows paths; prefer `rg` for
   search.
-  - Defaults: Use ASCII, all comment use UTF-8 for Vietnamese; match existing style; avoid new dependencies unless requested; keep edits minimal and focused.
+  - Defaults: Use UTF-8 for Vietnamese; match existing style; avoid new dependencies unless requested; keep edits minimal and focused.
   - Safeguards: Do not run destructive git commands (`reset --hard`, `checkout -- .`); avoid network access unless
   approved; honor sandbox limits.
   - Workflow: Read before editing; confirm assumptions when unclear; explain non-obvious PowerShell constructs with

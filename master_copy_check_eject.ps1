@@ -39,7 +39,9 @@
     [switch]$AutoYes,
 
     # Bo qua buoc Eject
-    [switch]$SkipEject
+    [switch]$SkipEject,
+    # Buoc copy chi su dung 1 thread de tránh lỗi cho USB
+    [switch]$ForceMultiThreadUsb
 )
 
 Set-StrictMode -Version Latest
@@ -1462,13 +1464,14 @@ $active = @()
 $threadNo = [int][Math]::Floor(16 / $PreparedTargets.Count)
 if ($threadNo -lt 1) { $threadNo = 1 }
 if ($threadNo -gt 8) { $threadNo = 8 }
+if (-not $ForceMultiThreadUsb) { $threadNo = 1 }
 
 # Khởi động copy cho tất cả ổ (song song)
 foreach ($drv in $PreparedTargets) {
     $useMirror = $MirrorTargets -contains $drv
     $threadNoForDrive = $threadNo
     $sizeGB = $null
-    if ($usbMap.ContainsKey($drv)) {
+    if ($ForceMultiThreadUsb -and $usbMap.ContainsKey($drv)) {
         $sizeGB = [double]($usbMap[$drv].Size / 1GB)
         if ($sizeGB -le 2.0) {
             $threadNoForDrive = [Math]::Min($threadNoForDrive, 2)
@@ -1476,6 +1479,9 @@ foreach ($drv in $PreparedTargets) {
         elseif ($sizeGB -le 4.0) {
             $threadNoForDrive = [Math]::Min($threadNoForDrive, 4)
         }
+    }
+    if (-not $ForceMultiThreadUsb -and $usbMap.ContainsKey($drv)) {
+        $threadNoForDrive = 1
     }
     if ($threadNoForDrive -lt 1) { $threadNoForDrive = 1 }
     if ($threadNoForDrive -ne $threadNo) {
