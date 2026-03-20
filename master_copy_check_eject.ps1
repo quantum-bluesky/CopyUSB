@@ -58,8 +58,10 @@ $MirrorTargets = @()
 
 $script:WriteTestMinBytes = 4096
 $script:WriteTestMaxBytes = 16384
-$script:CopyNoProgressSec = 90
-$script:CopyNoProgressDeltaBytes = 4096
+$script:CopyWarnNoProgressSec = 180
+$script:CopyHardNoProgressSec = 600
+$script:CopyNoProgressDeltaBytes = 65536
+$script:CopyProgressPollSec = 15
 
 # Chạy với quyền Administrator
 # Kiểm tra quyền admin
@@ -556,18 +558,50 @@ function Get-DriveFreeBytes {
     }
 }
 
+function Get-DirectorySizeBytes {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) { return 0L }
+
+    try {
+        $items = Get-ChildItem -LiteralPath $Path -Recurse -Force -File -ErrorAction Stop
+        if (-not $items) { return 0L }
+        $sum = ($items | Measure-Object -Property Length -Sum).Sum
+        if ($null -eq $sum) { return 0L }
+        return [int64]$sum
+    }
+    catch {
+        return $null
+    }
+}
+
 function Reset-CopySpeedState {
     param(
         [ValidateNotNullOrEmpty()]
-        [string]$DriveLetter
+        [string]$DriveLetter,
+        [string]$DestPath
     )
 
     $key = Get-DriveKey $DriveLetter
     if (-not $key) { return }
+
+    $initialBytes = $null
+    if (-not [string]::IsNullOrWhiteSpace($DestPath)) {
+        $initialBytes = Get-DirectorySizeBytes -Path $DestPath
+    }
+
     $script:CopySpeedStates[$key] = [PSCustomObject]@{
-        LastFreeBytes = $null
-        LastChange    = Get-Date
-        NoProgress    = $false
+        DestPath          = $DestPath
+        LastBytes         = $initialBytes
+        LastChange        = Get-Date
+        WarnedAtSec       = 0
+        LastWriteTestAt   = $null
+        LastWriteTestOk   = $null
+        LastWriteTestMsg  = $null
+        LastObservedBytes = $initialBytes
     }
 }
 
@@ -575,48 +609,73 @@ function Test-CopyNoProgress {
     param(
         [ValidateNotNullOrEmpty()]
         [string]$DriveLetter,
-        [ValidateRange(10, 600)]
-        [int]$NoProgressSec = $script:CopyNoProgressSec,
-        [ValidateRange(1024, 1048576)]
+        [ValidateRange(30, 3600)]
+        [int]$WarnNoProgressSec = $script:CopyWarnNoProgressSec,
+        [ValidateRange(60, 7200)]
+        [int]$HardNoProgressSec = $script:CopyHardNoProgressSec,
+        [ValidateRange(1024, 104857600)]
         [long]$MinDeltaBytes = $script:CopyNoProgressDeltaBytes
     )
 
     $key = Get-DriveKey $DriveLetter
     if (-not $key) { return $null }
-
-    if (-not $script:CopySpeedStates.ContainsKey($key)) {
-        Reset-CopySpeedState -DriveLetter $DriveLetter
-    }
+    if (-not $script:CopySpeedStates.ContainsKey($key)) { return $null }
 
     $state = $script:CopySpeedStates[$key]
-    if ($state.NoProgress) { return $null }
+    if ([string]::IsNullOrWhiteSpace($state.DestPath)) { return $null }
 
-    $freeBytes = Get-DriveFreeBytes -DriveLetter $DriveLetter
-    if ($null -eq $freeBytes) { return $null }
+    $destBytes = Get-DirectorySizeBytes -Path $state.DestPath
+    if ($null -eq $destBytes) { return $null }
 
-    if ($null -eq $state.LastFreeBytes) {
-        $state.LastFreeBytes = $freeBytes
+    if ($null -eq $state.LastBytes) {
+        $state.LastBytes = $destBytes
+        $state.LastObservedBytes = $destBytes
         $state.LastChange = Get-Date
-        return $null
-    }
-
-    $delta = $state.LastFreeBytes - $freeBytes
-    if ([Math]::Abs($delta) -ge $MinDeltaBytes) {
-        $state.LastFreeBytes = $freeBytes
-        $state.LastChange = Get-Date
-        return $null
-    }
-
-    $elapsed = (Get-Date) - $state.LastChange
-    if ($elapsed.TotalSeconds -ge $NoProgressSec) {
-        $state.NoProgress = $true
         return [PSCustomObject]@{
-            NoProgressSec = [int][Math]::Floor($elapsed.TotalSeconds)
-            FreeBytes     = $freeBytes
+            State         = 'ACTIVE'
+            NoProgressSec = 0
+            DestBytes     = $destBytes
         }
     }
 
-    return $null
+    $delta = [int64]$destBytes - [int64]$state.LastBytes
+    $state.LastObservedBytes = $destBytes
+    if ($delta -ge $MinDeltaBytes) {
+        $state.LastBytes = $destBytes
+        $state.LastChange = Get-Date
+        $state.WarnedAtSec = 0
+        return [PSCustomObject]@{
+            State         = 'ACTIVE'
+            NoProgressSec = 0
+            DeltaBytes    = $delta
+            DestBytes     = $destBytes
+        }
+    }
+
+    $elapsedSec = [int][Math]::Floor(((Get-Date) - $state.LastChange).TotalSeconds)
+    if ($elapsedSec -ge $HardNoProgressSec) {
+        return [PSCustomObject]@{
+            State         = 'HARDSTALL'
+            NoProgressSec = $elapsedSec
+            DeltaBytes    = $delta
+            DestBytes     = $destBytes
+        }
+    }
+    if ($elapsedSec -ge $WarnNoProgressSec) {
+        return [PSCustomObject]@{
+            State         = 'WARN'
+            NoProgressSec = $elapsedSec
+            DeltaBytes    = $delta
+            DestBytes     = $destBytes
+        }
+    }
+
+    return [PSCustomObject]@{
+        State         = 'IDLE'
+        NoProgressSec = $elapsedSec
+        DeltaBytes    = $delta
+        DestBytes     = $destBytes
+    }
 }
 
 function Get-FileHashHex {
@@ -1292,7 +1351,7 @@ function Start-CopyProcess {
         return $null
     }
 
-    Reset-CopySpeedState -DriveLetter $DriveLetter
+    Reset-CopySpeedState -DriveLetter $DriveLetter -DestPath $destPath
 
     $srcArg = Quote-PathArg $SourceRoot
     $dstArg = Quote-PathArg $destPath
@@ -1528,7 +1587,7 @@ foreach ($drv in $PreparedTargets) {
 while ((@($active)).Count -gt 0) {
     $procs = $active | Select-Object -ExpandProperty Process
     try {
-        [void](Wait-Process -InputObject $procs -Any -Timeout 5 -ErrorAction SilentlyContinue)
+        [void](Wait-Process -InputObject $procs -Any -Timeout $script:CopyProgressPollSec -ErrorAction SilentlyContinue)
     }
     catch {
         Start-Sleep -Seconds 1
@@ -1553,27 +1612,50 @@ while ((@($active)).Count -gt 0) {
         }
 
         if (-not $script:EarlyCopyErrors.ContainsKey($drv)) {
-            $noProgress = Test-CopyNoProgress -DriveLetter $drv -NoProgressSec $script:CopyNoProgressSec -MinDeltaBytes $script:CopyNoProgressDeltaBytes
-            if ($noProgress) {
-                Write-Log ("[SPEED] {0}: 0 KB/s > {1}s -> pause copy, test write." -f $drv, $noProgress.NoProgressSec) "WARN" -Drive $drv
-                try { Stop-Process -Id $item.Process.Id -Force -ErrorAction SilentlyContinue } catch { }
-                $writeTest = Test-DriveWriteSmallFile -DriveLetter $drv -MinBytes $script:WriteTestMinBytes -MaxBytes $script:WriteTestMaxBytes
-                if (-not $writeTest.Success) {
-                    $msg = if ($writeTest.Message) { $writeTest.Message } else { "Write test failed." }
-                    Write-Log ("[WRITE-TEST] {0}: FAIL -> FLAG SD BAD -> ABORT COPY. {1}" -f $drv, $msg) "ERROR" -Drive $drv
-                    if ($driveKey) {
-                        $script:CopyAbortReasons[$driveKey] = [PSCustomObject]@{
-                            Flag    = "BAD"
-                            Message = ("FLAG SD BAD. {0}" -f $msg)
-                        }
+            $progress = Test-CopyNoProgress -DriveLetter $drv -WarnNoProgressSec $script:CopyWarnNoProgressSec -HardNoProgressSec $script:CopyHardNoProgressSec -MinDeltaBytes $script:CopyNoProgressDeltaBytes
+            if ($progress) {
+                $state = if ($driveKey -and $script:CopySpeedStates.ContainsKey($driveKey)) { $script:CopySpeedStates[$driveKey] } else { $null }
+
+                if ($progress.State -eq 'WARN') {
+                    $shouldWarn = $true
+                    if ($state -and $state.WarnedAtSec -gt 0 -and (($progress.NoProgressSec - $state.WarnedAtSec) -lt 60)) {
+                        $shouldWarn = $false
+                    }
+                    if ($shouldWarn) {
+                        Write-Log ("[SPEED] {0}: khong thay bytes moi o dich trong {1}s (dest ~{2:N2} MB). Robocopy van duoc phep chay tiep." -f $drv, $progress.NoProgressSec, ($progress.DestBytes / 1MB)) "WARN" -Drive $drv
+                        if ($state) { $state.WarnedAtSec = $progress.NoProgressSec }
                     }
                 }
-                else {
-                    Write-Log ("[WRITE-TEST] {0}: OK -> FLAG SD WEAK -> ABORT COPY." -f $drv) "WARN" -Drive $drv
-                    if ($driveKey) {
-                        $script:CopyAbortReasons[$driveKey] = [PSCustomObject]@{
-                            Flag    = "WEAK"
-                            Message = ("FLAG SD WEAK. Write test OK after 0 KB/s > {0}s." -f $noProgress.NoProgressSec)
+                elseif ($progress.State -eq 'HARDSTALL') {
+                    $needWriteTest = $true
+                    if ($state -and $state.LastWriteTestAt) {
+                        if ((((Get-Date) - $state.LastWriteTestAt).TotalSeconds) -lt 120) {
+                            $needWriteTest = $false
+                        }
+                    }
+
+                    if ($needWriteTest) {
+                        Write-Log ("[SPEED] {0}: khong thay bytes moi o dich trong {1}s. Thu write-test nhung KHONG abort neu write-test OK." -f $drv, $progress.NoProgressSec) "WARN" -Drive $drv
+                        $writeTest = Test-DriveWriteSmallFile -DriveLetter $drv -MinBytes $script:WriteTestMinBytes -MaxBytes $script:WriteTestMaxBytes
+                        if ($state) {
+                            $state.LastWriteTestAt = Get-Date
+                            $state.LastWriteTestOk = $writeTest.Success
+                            $state.LastWriteTestMsg = $writeTest.Message
+                        }
+
+                        if (-not $writeTest.Success) {
+                            $msg = if ($writeTest.Message) { $writeTest.Message } else { "Write test failed." }
+                            Write-Log ("[WRITE-TEST] {0}: FAIL sau stall -> abort copy. {1}" -f $drv, $msg) "ERROR" -Drive $drv
+                            try { Stop-Process -Id $item.Process.Id -Force -ErrorAction SilentlyContinue } catch { }
+                            if ($driveKey) {
+                                $script:CopyAbortReasons[$driveKey] = [PSCustomObject]@{
+                                    Flag    = "BAD"
+                                    Message = ("No progress > {0}s va write-test FAIL. {1}" -f $progress.NoProgressSec, $msg)
+                                }
+                            }
+                        }
+                        else {
+                            Write-Log ("[WRITE-TEST] {0}: OK ({1} KB). Khong abort; tiep tuc doi robocopy." -f $drv, ([Math]::Round($writeTest.SizeBytes / 1KB, 1))) "WARN" -Drive $drv
                         }
                     }
                 }
