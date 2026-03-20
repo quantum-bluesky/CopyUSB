@@ -23,6 +23,11 @@
     [ValidateSet('CRC32', 'MD5', 'SHA256')]
     [string]$HashAlgorithm = 'MD5',
 
+    # Bật bước check/fix filesystem kiểu chkdsk trước khi copy
+    [switch]$CheckDiskBeforeCopy,
+    [switch]$FixDiskErrors,
+    [string]$DiskCheckScriptPath = ".\Check-UsbDisk.ps1",
+
     # Đường dẫn script EJECT
     [string]$EjectScriptPath = ".\removedrv.ps1",
 
@@ -114,6 +119,7 @@ if (-not $script:IsAdmin) {
 $script:SkipEjectEffective = $SkipEject
 $script:CheckPathIsEmpty = [string]::IsNullOrWhiteSpace($CheckScriptPath)
 $script:SortScriptIsEmpty = [string]::IsNullOrWhiteSpace($SortScriptPath)
+$script:DiskCheckPathIsEmpty = [string]::IsNullOrWhiteSpace($DiskCheckScriptPath)
 $script:EjectPathIsEmpty = [string]::IsNullOrWhiteSpace($EjectScriptPath)
 $script:RemountScriptIsEmpty = [string]::IsNullOrWhiteSpace($RemountScriptPath)
 $script:RemountCacheIsEmpty = [string]::IsNullOrWhiteSpace($RemountCachePath)
@@ -131,6 +137,9 @@ if (-not $script:CheckPathIsEmpty -and -not [System.IO.Path]::IsPathRooted($Chec
 }
 if (-not $script:SortScriptIsEmpty -and -not [System.IO.Path]::IsPathRooted($SortScriptPath)) {
     $SortScriptPath = Join-Path $ScriptDir $SortScriptPath
+}
+if (-not $script:DiskCheckPathIsEmpty -and -not [System.IO.Path]::IsPathRooted($DiskCheckScriptPath)) {
+    $DiskCheckScriptPath = Join-Path $ScriptDir $DiskCheckScriptPath
 }
 if (-not $script:SkipEjectEffective -and -not $script:EjectPathIsEmpty -and -not [System.IO.Path]::IsPathRooted($EjectScriptPath)) {
     $EjectScriptPath = Join-Path $ScriptDir $EjectScriptPath
@@ -338,6 +347,21 @@ function Get-SortExitMessage {
     }
 }
 
+function Get-DiskCheckExitMessage {
+    param([int]$Code)
+
+    switch ($Code) {
+        0 { return "Disk check OK, khong thay loi filesystem." }
+        1 { return "Disk check da sua loi va check lai OK." }
+        2 { return "Disk check phat hien loi filesystem nhung chua sua." }
+        3 { return "Disk check da thu sua nhung van con loi." }
+        4 { return "O dia khong san sang hoac khong ton tai." }
+        5 { return "Loi khi goi CHKDSK." }
+        6 { return "Can quyen Administrator de sua filesystem." }
+        default { return "Unknown disk check result." }
+    }
+}
+
 
 # ================== HÀM GHI LOG ==================
 function Write-Log {
@@ -444,6 +468,86 @@ function Try-RemountDrive {
 
     Write-Log ("Remount ổ {0} thất bại (ExitCode={1})." -f $DriveLetter, $code) "WARN" -Drive $DriveLetter
     return $false
+}
+
+function Invoke-DriveDiskCheck {
+    param(
+        [ValidateNotNullOrEmpty()]
+        [string]$DriveLetter
+    )
+
+    $result = [PSCustomObject]@{
+        Success = $true
+        Code    = 0
+        Message = "Disk check skipped."
+    }
+
+    if (-not $CheckDiskBeforeCopy) {
+        return $result
+    }
+
+    if ($script:DiskCheckPathIsEmpty) {
+        $result.Success = $false
+        $result.Code = 5
+        $result.Message = "DiskCheckScriptPath is empty."
+        return $result
+    }
+
+    if (-not (Test-Path $DiskCheckScriptPath)) {
+        $result.Success = $false
+        $result.Code = 5
+        $result.Message = ("Disk check script not found: {0}" -f $DiskCheckScriptPath)
+        return $result
+    }
+
+    $driveLog = Get-DriveLogFile -Drive $DriveLetter
+    $diskCheckArgs = @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", $DiskCheckScriptPath,
+        "-DestDrives", $DriveLetter,
+        "-NoConfirm",
+        "-NoPause"
+    )
+    if ($FixDiskErrors) {
+        $diskCheckArgs += "-Fix"
+    }
+    if ($driveLog) {
+        $diskCheckArgs += @("-LogFile", $driveLog)
+    }
+
+    Write-Log ("BẮT ĐẦU BƯỚC DISKCHECK cho ổ {0}..." -f $DriveLetter) -Drive $DriveLetter
+    Write-Log ("CMD DISKCHECK ({0}): {1} {2}" -f $DriveLetter, $script:ShellExe, ($diskCheckArgs -join " ")) -Drive $DriveLetter
+
+    try {
+        $null = & $script:ShellExe @diskCheckArgs
+        $diskCheckCode = $LASTEXITCODE
+    }
+    catch {
+        $result.Success = $false
+        $result.Code = 5
+        $result.Message = $_.Exception.Message
+        return $result
+    }
+
+    $result.Code = $diskCheckCode
+    $result.Message = Get-DiskCheckExitMessage -Code $diskCheckCode
+
+    if ($diskCheckCode -eq 0 -or $diskCheckCode -eq 1) {
+        if ($diskCheckCode -eq 1) {
+            Write-Log ("DISKCHECK detail: {0}" -f $result.Message) "WARN" -Drive $DriveLetter
+        }
+        else {
+            Write-Log ("DISKCHECK detail: {0}" -f $result.Message) -Drive $DriveLetter
+        }
+        Write-Log ("BƯỚC DISKCHECK hoàn tất cho ổ {0}." -f $DriveLetter) -Drive $DriveLetter
+        return $result
+    }
+
+    $result.Success = $false
+    Write-Log ("DISKCHECK detail: {0}" -f $result.Message) "ERROR" -Drive $DriveLetter
+    Write-Log ("BƯỚC DISKCHECK lỗi cho ổ {0} (ExitCode={1}). Bỏ qua ổ này." -f $DriveLetter, $diskCheckCode) "ERROR" -Drive $DriveLetter
+    return $result
 }
 
 function Get-BytesMd5 {
@@ -881,6 +985,17 @@ if (-not (Test-Path $CheckScriptPath)) {
     exit 1
 }
 
+if ($CheckDiskBeforeCopy) {
+    if ($script:DiskCheckPathIsEmpty) {
+        Write-Log "DiskCheckScriptPath rỗng. Vui lòng chỉ định đường dẫn hợp lệ." "ERROR"
+        exit 1
+    }
+    if (-not (Test-Path $DiskCheckScriptPath)) {
+        Write-Log "Script DISKCHECK không tồn tại: $DiskCheckScriptPath" "ERROR"
+        exit 1
+    }
+}
+
 # Validate script SORT
 if ($CheckAndSort) {
     if ($script:SortScriptIsEmpty) {
@@ -931,6 +1046,9 @@ Write-Host "DestDrives      : $($DestDrives -join ', ')"
 Write-Host "CheckScriptPath : $CheckScriptPath"
 Write-Host "SortScriptPath  : $SortScriptPath"
 Write-Host "CheckAndSort    : $CheckAndSort"
+Write-Host "CheckDiskBefore : $($CheckDiskBeforeCopy.IsPresent)"
+Write-Host "FixDiskErrors   : $($FixDiskErrors.IsPresent)"
+Write-Host "DiskCheckScript : $DiskCheckScriptPath"
 Write-Host "EjectScriptPath : $EjectScriptPath"
 Write-Host "RemountScript   : $RemountScriptPath"
 Write-Host "RemountCache    : $RemountCachePath"
@@ -1137,8 +1255,17 @@ $PreparedTargets = @()
 $MirrorTargets = @()
 
 foreach ($drv in $ValidTargets) {
+    $diskCheckResult = Invoke-DriveDiskCheck -DriveLetter $drv
+    if (-not $diskCheckResult.Success) {
+        continue
+    }
 
-    $disk = $usbMap[$drv]
+    $disk = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='{0}'" -f $drv) -ErrorAction SilentlyContinue
+    if (-not $disk) {
+        Write-Log ("Không thể đọc lại thông tin ổ {0} sau DISKCHECK. Bỏ qua." -f $drv) "ERROR" -Drive $drv
+        continue
+    }
+    $usbMap[$drv] = $disk
     $totalSize = [double]$disk.Size
     $freeSpace = [double]$disk.FreeSpace
     $usedBytes = $totalSize - $freeSpace
