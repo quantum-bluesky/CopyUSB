@@ -6,6 +6,10 @@ param(
     [switch]$NoConfirm,
     [switch]$NoPause,
     [string]$LogFile,
+    [ValidateRange(30, 86400)]
+    [int]$CheckTimeoutSec = 180,
+    [ValidateRange(0, 86400)]
+    [int]$FixTimeoutSec = 0,
 
     [switch]$h,
     [switch]$Help
@@ -52,6 +56,8 @@ function Show-Help {
     Write-Host "  -NoConfirm         : Khong hoi lai cau hinh."
     Write-Host "  -NoPause           : Khong doi Enter cuoi script."
     Write-Host "  -LogFile <path>    : Ghi them log vao file."
+    Write-Host "  -CheckTimeoutSec   : Timeout CHKDSK che do kiem tra (mac dinh 180 giay)."
+    Write-Host "  -FixTimeoutSec     : Timeout CHKDSK che do sua loi; 0 = khong gioi han (mac dinh 0)."
     Write-Host "  -h / -Help         : Hien thi huong dan nay."
     Write-Host ""
     Write-Host "Ma thoat:" -ForegroundColor Yellow
@@ -139,7 +145,9 @@ function Get-DriveSummary {
 function Invoke-Chkdsk {
     param(
         [string]$DriveLetter,
-        [string[]]$Arguments
+        [string[]]$Arguments,
+        [int]$TimeoutSec = 180,
+        [switch]$NativeConsole
     )
 
     $argumentList = @($DriveLetter)
@@ -147,37 +155,110 @@ function Invoke-Chkdsk {
         $argumentList += $Arguments
     }
 
-    $psi = [System.Diagnostics.ProcessStartInfo]::new()
-    $psi.FileName = "chkdsk.exe"
-    $psi.Arguments = ($argumentList -join ' ')
-    $psi.UseShellExecute = $false
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.CreateNoWindow = $true
+    $commandText = "chkdsk.exe {0}" -f ($argumentList -join ' ')
 
-    $proc = [System.Diagnostics.Process]::new()
-    $proc.StartInfo = $psi
+    if ($NativeConsole) {
+        $proc = $null
+        try {
+            $proc = Start-Process -FilePath "chkdsk.exe" `
+                -ArgumentList $argumentList `
+                -NoNewWindow `
+                -PassThru
 
-    [void]$proc.Start()
-    $stdout = $proc.StandardOutput.ReadToEnd()
-    $stderr = $proc.StandardError.ReadToEnd()
-    $proc.WaitForExit()
+            if ($TimeoutSec -le 0) {
+                $proc.WaitForExit()
+            }
+            elseif (-not $proc.WaitForExit($TimeoutSec * 1000)) {
+                try {
+                    if (-not $proc.HasExited) {
+                        Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+                    }
+                }
+                catch {
+                    Write-Verbose ("Khong the dung CHKDSK PID {0}: {1}" -f $proc.Id, $_.Exception.Message)
+                }
 
-    $textParts = @()
-    if (-not [string]::IsNullOrWhiteSpace($stdout)) { $textParts += $stdout.TrimEnd() }
-    if (-not [string]::IsNullOrWhiteSpace($stderr)) { $textParts += $stderr.TrimEnd() }
-    $combinedText = $textParts -join [Environment]::NewLine
+                if ($proc) {
+                    $proc.WaitForExit()
+                }
 
-    $lines = @()
-    if (-not [string]::IsNullOrWhiteSpace($combinedText)) {
-        $lines = $combinedText -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+                throw ("CHKDSK vuot qua timeout {0} giay va da bi dung. Lenh: {1}" -f $TimeoutSec, $commandText)
+            }
+
+            $exitCode = $proc.ExitCode
+        }
+        finally {
+            if ($proc) {
+                $proc.Dispose()
+            }
+        }
+
+        return [PSCustomObject]@{
+            ExitCode = $exitCode
+            Command  = $commandText
+            Output   = ""
+            Lines    = @()
+        }
     }
 
-    return [PSCustomObject]@{
-        ExitCode = $proc.ExitCode
-        Command  = ("chkdsk.exe {0}" -f ($argumentList -join ' '))
-        Output   = $combinedText
-        Lines    = @($lines)
+    $stdoutPath = [System.IO.Path]::GetTempFileName()
+    $stderrPath = [System.IO.Path]::GetTempFileName()
+    $proc = $null
+
+    try {
+        $proc = Start-Process -FilePath "chkdsk.exe" `
+            -ArgumentList $argumentList `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath `
+            -PassThru
+
+        if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
+            try {
+                if (-not $proc.HasExited) {
+                    Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+                }
+            }
+            catch {
+                Write-Verbose ("Khong the dung CHKDSK PID {0}: {1}" -f $proc.Id, $_.Exception.Message)
+            }
+
+            if ($proc) {
+                $proc.WaitForExit()
+            }
+
+            throw ("CHKDSK vuot qua timeout {0} giay va da bi dung. Lenh: chkdsk.exe {1}" -f $TimeoutSec, ($argumentList -join ' '))
+        }
+
+        $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw -Encoding utf8 } else { "" }
+        $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw -Encoding utf8 } else { "" }
+
+        $textParts = @()
+        if (-not [string]::IsNullOrWhiteSpace($stdout)) { $textParts += $stdout.TrimEnd() }
+        if (-not [string]::IsNullOrWhiteSpace($stderr)) { $textParts += $stderr.TrimEnd() }
+        $combinedText = $textParts -join [Environment]::NewLine
+
+        $lines = @()
+        if (-not [string]::IsNullOrWhiteSpace($combinedText)) {
+            $lines = $combinedText -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+        }
+
+        return [PSCustomObject]@{
+            ExitCode = $proc.ExitCode
+            Command  = $commandText
+            Output   = $combinedText
+            Lines    = @($lines)
+        }
+    }
+    finally {
+        if ($proc) {
+            $proc.Dispose()
+        }
+
+        foreach ($path in @($stdoutPath, $stderrPath)) {
+            if ($path -and (Test-Path -LiteralPath $path)) {
+                Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
 }
 
@@ -197,7 +278,11 @@ function Get-ChkdskAssessment {
         "the volume is in use by another process",
         "o dia dang duoc tien trinh khac su dung",
         "insufficient privileges",
-        "khong du dac quyen"
+        "khong du dac quyen",
+        "windows was unable to repair the drive",
+        "windows was unable to repair the file system",
+        "khong the sua chua o dia",
+        "khong the sua chua he thong tep"
     )
 
     $fixedPatterns = @(
@@ -229,6 +314,11 @@ function Get-ChkdskAssessment {
     )
 
     if ($FixMode) {
+        switch ($Result.ExitCode) {
+            1 { return "Fixed" }
+            3 { return "Failed" }
+        }
+
         foreach ($pattern in $fixedPatterns) {
             if ($text.Contains($pattern)) {
                 return "Fixed"
@@ -250,6 +340,10 @@ function Get-ChkdskAssessment {
 
     if ($Result.ExitCode -eq 0) {
         return "Healthy"
+    }
+
+    if ($Result.ExitCode -eq 3) {
+        return "Failed"
     }
 
     foreach ($pattern in $failurePatterns) {
@@ -306,10 +400,13 @@ Write-Host "===== CAU HINH DISK CHECK =====" -ForegroundColor Cyan
 Write-Host "DestDrives : $($DestDrives -join ', ')"
 Write-Host "Fix        : $($Fix.IsPresent)"
 Write-Host "LogFile    : $LogFile"
+Write-Host "CheckTimeoutSec : $CheckTimeoutSec"
+Write-Host "FixTimeoutSec   : $FixTimeoutSec"
 Write-Host ""
 
 if ($Fix -and -not $NoConfirm) {
     Write-Host "Luu y: che do FIX se dismount o tam thoi bang 'chkdsk /f /x'." -ForegroundColor Yellow
+    Write-Host "Neu CHKDSK hoi xac nhan sua chuoi cluster/file *.CHK tren FAT, hay tra loi truc tiep trong console." -ForegroundColor Yellow
 }
 
 if (-not $NoConfirm) {
@@ -341,7 +438,7 @@ foreach ($drive in $DestDrives) {
     }
 
     try {
-        $checkResult = Invoke-Chkdsk -DriveLetter $drive -Arguments @()
+        $checkResult = Invoke-Chkdsk -DriveLetter $drive -Arguments @() -TimeoutSec $CheckTimeoutSec
         $checkAssessment = Get-ChkdskAssessment -Result $checkResult
         Write-ChkdskResult -DriveLetter $drive -Label "CHECK" -Result $checkResult -Assessment $checkAssessment
     }
@@ -369,7 +466,8 @@ foreach ($drive in $DestDrives) {
     }
 
     try {
-        $fixResult = Invoke-Chkdsk -DriveLetter $drive -Arguments @('/f', '/x')
+        Write-Log ("[{0}] Chay FIX theo che do native console de tranh treo khi CHKDSK can hoi dap truc tiep." -f $drive)
+        $fixResult = Invoke-Chkdsk -DriveLetter $drive -Arguments @('/f', '/x') -TimeoutSec $FixTimeoutSec -NativeConsole
         $fixAssessment = Get-ChkdskAssessment -Result $fixResult -FixMode
         Write-ChkdskResult -DriveLetter $drive -Label "FIX" -Result $fixResult -Assessment $fixAssessment
     }
@@ -379,10 +477,16 @@ foreach ($drive in $DestDrives) {
         continue
     }
 
+    if ($fixAssessment -eq "Failed") {
+        Write-Log ("Windows/CHKDSK khong sua duoc o {0}. Bo qua buoc check lai." -f $drive) "ERROR"
+        if ($overallExitCode -lt 3) { $overallExitCode = 3 }
+        continue
+    }
+
     [void](Wait-DriveReady -DriveLetter $drive -TimeoutSec 20)
 
     try {
-        $recheckResult = Invoke-Chkdsk -DriveLetter $drive -Arguments @()
+        $recheckResult = Invoke-Chkdsk -DriveLetter $drive -Arguments @() -TimeoutSec $CheckTimeoutSec
         $recheckAssessment = Get-ChkdskAssessment -Result $recheckResult
         Write-ChkdskResult -DriveLetter $drive -Label "RECHECK" -Result $recheckResult -Assessment $recheckAssessment
     }
