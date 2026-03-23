@@ -511,6 +511,7 @@ function Invoke-DriveDiskCheck {
     )
     if ($FixDiskErrors) {
         $diskCheckArgs += "-Fix"
+        $diskCheckArgs += "-AutoYesFixPrompt"
     }
     if ($driveLog) {
         $diskCheckArgs += @("-LogFile", $driveLog)

@@ -3,6 +3,7 @@ param(
     [string[]]$DestDrives = @("F:", "G:", "H:", "I:", "J:", "K:", "L:", "M:"),
 
     [switch]$Fix,
+    [switch]$AutoYesFixPrompt,
     [switch]$NoConfirm,
     [switch]$NoPause,
     [string]$LogFile,
@@ -53,6 +54,7 @@ function Show-Help {
     Write-Host "Tham so:" -ForegroundColor Yellow
     Write-Host "  -DestDrives <list> : Danh sach o can kiem tra."
     Write-Host "  -Fix               : Thu sua loi bang 'chkdsk /f /x' neu lan check dau bao co van de."
+    Write-Host "  -AutoYesFixPrompt  : Tu dong tra loi Y neu CHKDSK hoi xac nhan trong luc FIX."
     Write-Host "  -NoConfirm         : Khong hoi lai cau hinh."
     Write-Host "  -NoPause           : Khong doi Enter cuoi script."
     Write-Host "  -LogFile <path>    : Ghi them log vao file."
@@ -147,7 +149,8 @@ function Invoke-Chkdsk {
         [string]$DriveLetter,
         [string[]]$Arguments,
         [int]$TimeoutSec = 180,
-        [switch]$NativeConsole
+        [switch]$NativeConsole,
+        [switch]$AutoYesPrompt
     )
 
     $argumentList = @($DriveLetter)
@@ -160,10 +163,20 @@ function Invoke-Chkdsk {
     if ($NativeConsole) {
         $proc = $null
         try {
-            $proc = Start-Process -FilePath "chkdsk.exe" `
-                -ArgumentList $argumentList `
-                -NoNewWindow `
-                -PassThru
+            if ($AutoYesPrompt) {
+                $yesSequence = ((1..16) | ForEach-Object { 'echo Y' }) -join ' & '
+                $wrappedCommand = "({0}) | {1}" -f $yesSequence, $commandText
+                $proc = Start-Process -FilePath "cmd.exe" `
+                    -ArgumentList @('/d', '/c', $wrappedCommand) `
+                    -NoNewWindow `
+                    -PassThru
+            }
+            else {
+                $proc = Start-Process -FilePath "chkdsk.exe" `
+                    -ArgumentList $argumentList `
+                    -NoNewWindow `
+                    -PassThru
+            }
 
             if ($TimeoutSec -le 0) {
                 $proc.WaitForExit()
@@ -399,6 +412,7 @@ if ($Fix -and -not (Test-IsAdministrator)) {
 Write-Host "===== CAU HINH DISK CHECK =====" -ForegroundColor Cyan
 Write-Host "DestDrives : $($DestDrives -join ', ')"
 Write-Host "Fix        : $($Fix.IsPresent)"
+Write-Host "AutoYesFixPrompt : $($AutoYesFixPrompt.IsPresent)"
 Write-Host "LogFile    : $LogFile"
 Write-Host "CheckTimeoutSec : $CheckTimeoutSec"
 Write-Host "FixTimeoutSec   : $FixTimeoutSec"
@@ -406,7 +420,12 @@ Write-Host ""
 
 if ($Fix -and -not $NoConfirm) {
     Write-Host "Luu y: che do FIX se dismount o tam thoi bang 'chkdsk /f /x'." -ForegroundColor Yellow
-    Write-Host "Neu CHKDSK hoi xac nhan sua chuoi cluster/file *.CHK tren FAT, hay tra loi truc tiep trong console." -ForegroundColor Yellow
+    if ($AutoYesFixPrompt) {
+        Write-Host "Script se tu dong tra loi Y neu CHKDSK hoi xac nhan trong luc FIX." -ForegroundColor Yellow
+    }
+    else {
+        Write-Host "Neu CHKDSK hoi xac nhan sua chuoi cluster/file *.CHK tren FAT, hay tra loi truc tiep trong console." -ForegroundColor Yellow
+    }
 }
 
 if (-not $NoConfirm) {
@@ -466,8 +485,14 @@ foreach ($drive in $DestDrives) {
     }
 
     try {
-        Write-Log ("[{0}] Chay FIX theo che do native console de tranh treo khi CHKDSK can hoi dap truc tiep." -f $drive)
-        $fixResult = Invoke-Chkdsk -DriveLetter $drive -Arguments @('/f', '/x') -TimeoutSec $FixTimeoutSec -NativeConsole
+        if ($AutoYesFixPrompt) {
+            Write-Log ("[{0}] Chay FIX native console va tu dong tra loi Y neu CHKDSK hoi xac nhan." -f $drive)
+        }
+        else {
+            Write-Log ("[{0}] Chay FIX theo che do native console de tranh treo khi CHKDSK can hoi dap truc tiep." -f $drive)
+        }
+
+        $fixResult = Invoke-Chkdsk -DriveLetter $drive -Arguments @('/f', '/x') -TimeoutSec $FixTimeoutSec -NativeConsole -AutoYesPrompt:$AutoYesFixPrompt
         $fixAssessment = Get-ChkdskAssessment -Result $fixResult -FixMode
         Write-ChkdskResult -DriveLetter $drive -Label "FIX" -Result $fixResult -Assessment $fixAssessment
     }
