@@ -111,4 +111,3 @@ if ($error -or $err) {
     }
 }
 
-pause

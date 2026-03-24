@@ -34,6 +34,8 @@
     # Đường dẫn script remount USB (dùng để capture / remount)
     [string]$RemountScriptPath = ".\Remount-Usb.ps1",
     [string]$RemountCachePath = ".\usb_remount_cache.json",
+    [ValidateSet(0, 1)]
+    [int]$RemountDrive = 0,
 
     # Thư mục log
     [ValidateNotNullOrEmpty()]
@@ -123,6 +125,7 @@ $script:DiskCheckPathIsEmpty = [string]::IsNullOrWhiteSpace($DiskCheckScriptPath
 $script:EjectPathIsEmpty = [string]::IsNullOrWhiteSpace($EjectScriptPath)
 $script:RemountScriptIsEmpty = [string]::IsNullOrWhiteSpace($RemountScriptPath)
 $script:RemountCacheIsEmpty = [string]::IsNullOrWhiteSpace($RemountCachePath)
+$script:RemountDriveEnabled = ($RemountDrive -eq 1)
 $script:LogDirIsEmpty = [string]::IsNullOrWhiteSpace($LogDir)
 
 if ($script:EjectPathIsEmpty) {
@@ -446,6 +449,10 @@ function Try-RemountDrive {
         [string]$DriveLetter,
         [int]$WaitSec = 20
     )
+
+    if (-not $script:RemountDriveEnabled) {
+        return $false
+    }
 
     if (-not (Test-Path $RemountScriptPath)) {
         return $false
@@ -1053,12 +1060,13 @@ Write-Host "DiskCheckScript : $DiskCheckScriptPath"
 Write-Host "EjectScriptPath : $EjectScriptPath"
 Write-Host "RemountScript   : $RemountScriptPath"
 Write-Host "RemountCache    : $RemountCachePath"
+Write-Host "RemountDrive    : $RemountDrive"
 Write-Host "LogFile         : $script:LogFile"
 Write-Host "EnableHash      : $($EnableHash.IsPresent)"
 Write-Host "HashLastN       : $HashLastN"
 Write-Host "HashAlgorithm   : $HashAlgorithm"
 Write-Host ""
-if ((Test-Path $RemountScriptPath) -and (-not $script:IsAdmin)) {
+if ($script:RemountDriveEnabled -and (Test-Path $RemountScriptPath) -and (-not $script:IsAdmin)) {
     Write-Host "LƯU Ý: Để remount USB khi bị rút/mất kết nối, hãy chạy PowerShell 'Run as Administrator'." -ForegroundColor Yellow
     Write-Log  "Lưu ý: cần quyền Administrator để remount USB khi bị rút/mất kết nối." "WARN"
 }
@@ -1186,7 +1194,10 @@ if ($ValidTargets.Count -eq 0) {
     exit 1
 }
 # ================== CAPTURE THONG TIN REMOUNT ==================
-if ($script:RemountScriptIsEmpty -or $script:RemountCacheIsEmpty) {
+if (-not $script:RemountDriveEnabled) {
+    Write-Log "RemountDrive=0 -> bỏ qua capture thông tin remount và tự động remount." "WARN"
+}
+elseif ($script:RemountScriptIsEmpty -or $script:RemountCacheIsEmpty) {
     if ($script:RemountScriptIsEmpty) {
         Write-Log "RemountScriptPath rỗng -> không thể capture/remount khi có lỗi." "WARN"
     }
@@ -1448,6 +1459,9 @@ function Start-CopyProcess {
             Write-Log ("Ổ {0} đã remount, tiếp tục copy." -f $DriveLetter) "WARN" -Drive $DriveLetter
         }
         else {
+            if (-not $script:RemountDriveEnabled) {
+                Write-Log ("RemountDrive=0 -> bỏ qua tự động remount cho ổ {0}." -f $DriveLetter) "WARN" -Drive $DriveLetter
+            }
             return $null
         }
     }
@@ -1852,19 +1866,24 @@ while ((@($active)).Count -gt 0) {
 
         $stillThere = Test-Path ($drv + "\\")
         if (-not $stillThere) {
-            Write-Log ("Ổ {0} không còn sẵn sàng (có thể bị rút). Thử remount..." -f $drv) "ERROR" -Drive $drv
-            $remounted = Try-RemountDrive -DriveLetter $drv -WaitSec 30
-            if ($remounted) {
-                Write-Log ("Remount ổ {0} thành công, thử copy lại..." -f $drv) "WARN" -Drive $drv
-                $retryProc = Start-CopyProcess -DriveLetter $drv -UseMirror ($MirrorTargets -contains $drv) -ThreadNo $threadNo
-                if ($retryProc) {
-                    $copyResults.Remove($drv) | Out-Null
-                    $active += $retryProc
-                    continue
+            if ($script:RemountDriveEnabled) {
+                Write-Log ("Ổ {0} không còn sẵn sàng (có thể bị rút). Thử remount..." -f $drv) "ERROR" -Drive $drv
+                $remounted = Try-RemountDrive -DriveLetter $drv -WaitSec 30
+                if ($remounted) {
+                    Write-Log ("Remount ổ {0} thành công, thử copy lại..." -f $drv) "WARN" -Drive $drv
+                    $retryProc = Start-CopyProcess -DriveLetter $drv -UseMirror ($MirrorTargets -contains $drv) -ThreadNo $threadNo
+                    if ($retryProc) {
+                        $copyResults.Remove($drv) | Out-Null
+                        $active += $retryProc
+                        continue
+                    }
+                    else {
+                        Write-Log ("Khởi động copy lại ổ {0} sau remount thất bại." -f $drv) "ERROR" -Drive $drv
+                    }
                 }
-                else {
-                    Write-Log ("Khởi động copy lại ổ {0} sau remount thất bại." -f $drv) "ERROR" -Drive $drv
-                }
+            }
+            else {
+                Write-Log ("Ổ {0} không còn sẵn sàng (có thể bị rút). RemountDrive=0 -> bỏ qua tự động remount." -f $drv) "ERROR" -Drive $drv
             }
         }
 
