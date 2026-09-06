@@ -75,6 +75,8 @@ $script:CopyWarnNoProgressSec = 180
 $script:CopyHardNoProgressSec = 600
 $script:CopyNoProgressDeltaBytes = 65536
 $script:CopyProgressPollSec = 15
+$script:MaxStallChecks = 3
+$script:MaxWarnChecks = 5
 
 # Chạy với quyền Administrator
 # Kiểm tra quyền admin
@@ -720,6 +722,8 @@ function Reset-CopySpeedState {
         LastWriteTestAt   = $null
         LastWriteTestOk   = $null
         LastWriteTestMsg  = $null
+        StallCheckCount   = 0
+        WarnCheckCount    = 0
         LastObservedBytes = $initialBytes
     }
 }
@@ -763,6 +767,8 @@ function Test-CopyNoProgress {
         $state.LastBytes = $destBytes
         $state.LastChange = Get-Date
         $state.WarnedAtSec = 0
+        $state.StallCheckCount = 0
+        $state.WarnCheckCount = 0
         return [PSCustomObject]@{
             State         = 'ACTIVE'
             NoProgressSec = 0
@@ -1074,6 +1080,8 @@ Write-Host "LogFile         : $script:LogFile"
 Write-Host "EnableHash      : $($EnableHash.IsPresent)"
 Write-Host "HashLastN       : $HashLastN"
 Write-Host "HashAlgorithm   : $HashAlgorithm"
+Write-Host "MaxStallChecks  : $script:MaxStallChecks"
+Write-Host "MaxWarnChecks   : $script:MaxWarnChecks"
 Write-Host ""
 if ($script:RemountDriveEnabled -and (Test-Path $RemountScriptPath) -and (-not $script:IsAdmin)) {
     Write-Host "LƯU Ý: Để remount USB khi bị rút/mất kết nối, hãy chạy PowerShell 'Run as Administrator'." -ForegroundColor Yellow
@@ -1774,7 +1782,7 @@ while ((@($active)).Count -gt 0) {
             if ($errInfo) {
                 $script:EarlyCopyErrors[$drv] = $errInfo
                 $detail = Format-RobocopyErrorMessage -ErrorInfo $errInfo
-                Write-Log ("COPY toi {0} phat hien loi robocopy, dung som. {1}" -f $drv, $detail) "ERROR" -Drive $drv
+                Write-Log ("COPY tới {0} phát hiện lỗi robocopy, dừng sớm. {1}" -f $drv, $detail) "ERROR" -Drive $drv
                 try { Stop-Process -Id $item.Process.Id -Force -ErrorAction SilentlyContinue } catch { }
             }
         }
@@ -1790,8 +1798,26 @@ while ((@($active)).Count -gt 0) {
                         $shouldWarn = $false
                     }
                     if ($shouldWarn) {
-                        Write-Log ("[SPEED] {0}: khong thay bytes moi o dich trong {1}s (dest ~{2:N2} MB). Robocopy van duoc phep chay tiep." -f $drv, $progress.NoProgressSec, ($progress.DestBytes / 1MB)) "WARN" -Drive $drv
-                        if ($state) { $state.WarnedAtSec = $progress.NoProgressSec }
+                        $warnCheckCount = 0
+                        if ($state) {
+                            $state.WarnCheckCount = [int]$state.WarnCheckCount + 1
+                            $warnCheckCount = $state.WarnCheckCount
+                            $state.WarnedAtSec = $progress.NoProgressSec
+                        }
+                        Write-Log ("[SPEED] {0}: không thấy bytes mới ở đích trong {1}s (dest ~{2:N2} MB), cảnh báo {3}/{4}." -f $drv, $progress.NoProgressSec, ($progress.DestBytes / 1MB), $warnCheckCount, $script:MaxWarnChecks) "WARN" -Drive $drv
+                        if ($warnCheckCount -gt $script:MaxWarnChecks) {
+                            $msg = ("Copy bị dừng do USB {0} không có tiến triển và phát cảnh báo liên tục {1} lần; vượt giới hạn {2} lần." -f $drv, $warnCheckCount, $script:MaxWarnChecks)
+                            Write-Log ("[SPEED] {0}: vượt giới hạn WARN {1} lần -> dừng process copy." -f $drv, $warnCheckCount) "ERROR" -Drive $drv
+                            try { Stop-Process -Id $item.Process.Id -Force -ErrorAction SilentlyContinue } catch { }
+                            if ($driveKey) {
+                                $script:CopyAbortReasons[$driveKey] = [PSCustomObject]@{
+                                    Flag       = "REPEATED_WARN"
+                                    CheckType  = "WARN"
+                                    RetryCount = $warnCheckCount
+                                    Message    = $msg
+                                }
+                            }
+                        }
                     }
                 }
                 elseif ($progress.State -eq 'HARDSTALL') {
@@ -1803,7 +1829,13 @@ while ((@($active)).Count -gt 0) {
                     }
 
                     if ($needWriteTest) {
-                        Write-Log ("[SPEED] {0}: khong thay bytes moi o dich trong {1}s. Thu write-test nhung KHONG abort neu write-test OK." -f $drv, $progress.NoProgressSec) "WARN" -Drive $drv
+                        $stallCheckCount = 0
+                        if ($state) {
+                            $state.StallCheckCount = [int]$state.StallCheckCount + 1
+                            $stallCheckCount = $state.StallCheckCount
+                        }
+                        Write-Log ("[STALL-CHECK] {0}: lần kiểm tra liên tục {1}/{2}, không có tiến triển trong {3}s." -f $drv, $stallCheckCount, $script:MaxStallChecks, $progress.NoProgressSec) "WARN" -Drive $drv
+                        Write-Log ("[SPEED] {0}: không thấy bytes mới ở đích trong {1}s. Thử write-test nhưng KHÔNG abort nếu write-test OK." -f $drv, $progress.NoProgressSec) "WARN" -Drive $drv
                         $writeTest = Test-DriveWriteSmallFile -DriveLetter $drv -MinBytes $script:WriteTestMinBytes -MaxBytes $script:WriteTestMaxBytes
                         if ($state) {
                             $state.LastWriteTestAt = Get-Date
@@ -1823,7 +1855,23 @@ while ((@($active)).Count -gt 0) {
                             }
                         }
                         else {
-                            Write-Log ("[WRITE-TEST] {0}: OK ({1} KB). Khong abort; tiep tuc doi robocopy." -f $drv, ([Math]::Round($writeTest.SizeBytes / 1KB, 1))) "WARN" -Drive $drv
+                            if ($stallCheckCount -ge $script:MaxStallChecks) {
+                                $msg = ("Copy bị dừng do USB {0} bị stall liên tục {1} lần; không tiếp tục copy." -f $drv, $stallCheckCount)
+                                Write-Log ("[WRITE-TEST] {0}: OK ({1} KB), nhưng đã đạt giới hạn {2} lần stall -> dừng copy." -f $drv, ([Math]::Round($writeTest.SizeBytes / 1KB, 1), $script:MaxStallChecks)) "ERROR" -Drive $drv
+                                Write-Log ("[STALL-CHECK] {0}: dừng process copy sau {1} lần kiểm tra liên tục." -f $drv, $stallCheckCount) "ERROR" -Drive $drv
+                                try { Stop-Process -Id $item.Process.Id -Force -ErrorAction SilentlyContinue } catch { }
+                                if ($driveKey) {
+                                    $script:CopyAbortReasons[$driveKey] = [PSCustomObject]@{
+                                        Flag       = "REPEATED_STALL"
+                                        CheckType  = "HARDSTALL"
+                                        RetryCount = $stallCheckCount
+                                        Message    = $msg
+                                    }
+                                }
+                            }
+                            else {
+                                Write-Log ("[WRITE-TEST] {0}: OK ({1} KB). Chưa đạt giới hạn stall; tiếp tục đợi robocopy." -f $drv, ([Math]::Round($writeTest.SizeBytes / 1KB, 1))) "WARN" -Drive $drv
+                            }
                         }
                     }
                 }
@@ -1844,15 +1892,20 @@ while ((@($active)).Count -gt 0) {
         }
 
         if ($abortInfo) {
+            $abortRetryCount = $null
+            if ($abortInfo.PSObject.Properties.Name -contains 'RetryCount') {
+                $abortRetryCount = $abortInfo.RetryCount
+            }
             $copyResults[$drv] = $code
             $active = @($active | Where-Object { $_.Process.Id -ne $done.Process.Id })
             Write-Log ("COPY toi {0} BI ABORT. {1}" -f $drv, $abortInfo.Message) "ERROR" -Drive $drv
             $flowErrors[$drv] = [PSCustomObject]@{
-                Drive   = $drv
-                Success = $false
-                Stage   = "COPY"
-                Code    = 998
-                Message = $abortInfo.Message
+                Drive      = $drv
+                Success    = $false
+                Stage      = if ($abortInfo.Flag -eq "REPEATED_STALL") { "COPY_STALL_REPEATED" } elseif ($abortInfo.Flag -eq "REPEATED_WARN") { "COPY_WARN_REPEATED" } else { "COPY" }
+                Code       = 998
+                Message    = $abortInfo.Message
+                RetryCount = $abortRetryCount
             }
             if ($driveKey -and $script:CopySpeedStates.ContainsKey($driveKey)) {
                 $script:CopySpeedStates.Remove($driveKey) | Out-Null
@@ -1965,6 +2018,14 @@ if ($flowErrors.Count -gt 0) {
         Write-Log (" - {0}: Lỗi {1} (ExitCode={2})" -f $k, $e.Stage, $e.Code) "ERROR"
         if ($e.Message) {
             Write-Log ("   detail: {0}" -f $e.Message) "ERROR" -Drive $k
+        }
+        if ($e.PSObject.Properties.Name -contains 'RetryCount' -and $null -ne $e.RetryCount) {
+            if ($e.Stage -eq "COPY_WARN_REPEATED") {
+                Write-Log ("   summary: USB {0} đã phát WARN không tiến triển liên tục {1} lần, vượt giới hạn {2}; process copy đã dừng." -f $k, $e.RetryCount, $script:MaxWarnChecks) "ERROR" -Drive $k
+            }
+            else {
+                Write-Log ("   summary: USB {0} đã bị check stall liên tục {1}/{2} lần; process copy đã dừng." -f $k, $e.RetryCount, $script:MaxStallChecks) "ERROR" -Drive $k
+            }
         }
     }
     $overallExitCode = 1
