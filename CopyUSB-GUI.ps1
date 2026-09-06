@@ -83,6 +83,10 @@ function Split-DriveText {
         } | Sort-Object -Unique)
 }
 
+function Get-DriveArgument {
+    return ((Split-DriveText $destText.Text) -join ', ')
+}
+
 function Quote-ProcessArgument {
     param([AllowEmptyString()][string]$Value)
     if ($null -eq $Value) { return '""' }
@@ -199,10 +203,8 @@ function New-ToolCommand {
             [void]$parts.Add((Quote-PowerShellLiteral $checkScriptText.Text.Trim()))
             [void]$parts.Add('-SourceRoot')
             [void]$parts.Add((Quote-PowerShellLiteral $sourceText.Text.Trim()))
-            foreach ($drive in (Split-DriveText $destText.Text)) {
-                [void]$parts.Add('-DestDrives')
-                [void]$parts.Add((Quote-PowerShellLiteral $drive))
-            }
+            [void]$parts.Add('-DestDrives')
+            [void]$parts.Add((Quote-PowerShellLiteral (Get-DriveArgument)))
             [void]$parts.Add('-HashLastN')
             [void]$parts.Add((Quote-PowerShellLiteral $hashLastNText.Text.Trim()))
             [void]$parts.Add('-HashAlgorithm')
@@ -216,10 +218,8 @@ function New-ToolCommand {
         'CheckUsbDisk' {
             [void]$parts.Add('&')
             [void]$parts.Add((Quote-PowerShellLiteral $diskCheckScriptText.Text.Trim()))
-            foreach ($drive in (Split-DriveText $destText.Text)) {
-                [void]$parts.Add('-DestDrives')
-                [void]$parts.Add((Quote-PowerShellLiteral $drive))
-            }
+            [void]$parts.Add('-DestDrives')
+            [void]$parts.Add((Quote-PowerShellLiteral (Get-DriveArgument)))
             [void]$parts.Add('-NoConfirm')
             [void]$parts.Add('-NoPause')
             [void]$parts.Add('-LogFile')
@@ -255,10 +255,8 @@ function New-MasterCommand {
     [void]$parts.Add((Quote-PowerShellLiteral $script:MasterScriptPath))
     [void]$parts.Add('-SourceRoot')
     [void]$parts.Add((Quote-PowerShellLiteral $sourceText.Text.Trim()))
-    foreach ($drive in (Split-DriveText $destText.Text)) {
-        [void]$parts.Add('-DestDrives')
-        [void]$parts.Add((Quote-PowerShellLiteral $drive))
-    }
+    [void]$parts.Add('-DestDrives')
+    [void]$parts.Add((Quote-PowerShellLiteral (Get-DriveArgument)))
     foreach ($item in @(
         @('-CheckScriptPath', $checkScriptText.Text.Trim()),
         @('-SortScriptPath', $sortScriptText.Text.Trim()),
@@ -459,6 +457,7 @@ function Add-FieldRow {
     if ($null -ne $Extra) { [void]$settings.Controls.Add($Extra, $Column + 2, $Row) }
 }
 Add-FieldRow 0 'SourceRoot' $sourceText 0 $browseSourceButton
+$settings.SetColumnSpan($sourceText, 2)
 Add-FieldRow 1 'DestDrives (USB)' $destText 0 $scanButton
 Add-FieldRow 2 'CheckScriptPath' $checkScriptText 0
 Add-FieldRow 2 'SortScriptPath' $sortScriptText 2
@@ -471,7 +470,6 @@ Add-FieldRow 6 'HashLastN (0=all)' $hashLastNText 2
 Add-FieldRow 6 'HashAlgorithm' $hashAlgorithmCombo 0
 Add-FieldRow 7 'Chế độ chạy' $runModeCombo 0
 # Add-FieldRow 7 'RemountDrive' $remountDriveCombo 2
-Add-FieldRow 7 'Sort mode độc lập' $sortModeCombo 2
 
 function New-CheckBox { param([string]$Text, [bool]$Checked); $box = New-Object System.Windows.Forms.CheckBox; $box.Text = $Text; $box.Checked = $Checked; $box.AutoSize = $true; return $box }
 $checkCopyToolCheck = New-CheckBox 'Enable check_copy_hash' $EnableCheck
@@ -487,19 +485,21 @@ $sortForceCheck = New-CheckBox 'Sort -Force' $true
 $sortNoParallelCheck = New-CheckBox 'Sort tuần tự' $false
 $checks = New-Object System.Windows.Forms.FlowLayoutPanel
 $checks.Dock = 'Fill'; $checks.AutoSize = $true; $checks.WrapContents = $true
-[void]$checks.Controls.Add((New-Label 'SortScope'))
-[void]$checks.Controls.Add($sortScopeCombo)
 [void]$checks.Controls.Add((New-Label 'FileFilter'))
-[void]$checks.Controls.Add($sortFilterCombo)
-[void]$checks.Controls.Add((New-Label 'Throttle'))
-[void]$checks.Controls.Add($throttleText)
 [void]$checks.Controls.Add($checkCopyToolCheck)
 [void]$checks.Controls.Add($enableHashCheck)
 [void]$checks.Controls.Add($diskToolCheck)
 [void]$checks.Controls.Add($fixDiskCheck)
 [void]$checks.Controls.Add($sortToolCheck)
+[void]$checks.Controls.Add($sortFilterCombo)
+[void]$checks.Controls.Add((New-Label 'SortScope'))
+[void]$checks.Controls.Add($sortScopeCombo)
 [void]$checks.Controls.Add($sortForceCheck)
 [void]$checks.Controls.Add($sortNoParallelCheck)
+[void]$checks.Controls.Add((New-Label 'Throttle'))
+[void]$checks.Controls.Add($throttleText)
+[void]$checks.Controls.Add((New-Label 'Sort mode độc lập'))
+[void]$checks.Controls.Add($sortModeCombo)
 [void]$checks.Controls.Add($autoYesCheck)
 [void]$checks.Controls.Add($skipEjectCheck)
 [void]$checks.Controls.Add($forceMultiThreadCheck)
@@ -512,9 +512,22 @@ $checkCopyToolCheck.Add_CheckedChanged({
     $hashAlgorithmCombo.Enabled = $checkCopyToolCheck.Checked
     $enableHashCheck.Enabled = $checkCopyToolCheck.Checked
 })
+$fixDiskCheck.Enabled = $diskToolCheck.Checked
+$diskToolCheck.Add_CheckedChanged({
+    $fixDiskCheck.Enabled = $diskToolCheck.Checked
+})
+$sortToolCheck.Add_CheckedChanged({
+    $sortModeCombo.Enabled = $sortToolCheck.Checked
+    $sortScopeCombo.Enabled = $sortToolCheck.Checked
+    $sortFilterCombo.Enabled = $sortToolCheck.Checked
+    $throttleText.Enabled = $sortToolCheck.Checked
+    $sortForceCheck.Enabled = $sortToolCheck.Checked
+    $sortNoParallelCheck.Enabled = $sortToolCheck.Checked
+})
+$skipEjectCheck.Checked = $true
 [void]$settings.Controls.Add($checks, 0, 7); $settings.SetColumnSpan($checks, 4)
 $warningLabel = New-Object System.Windows.Forms.Label
-$warningLabel.Text = 'Lưu ý: cleanup/format/eject có thể thay đổi dữ liệu trên USB. Hãy kiểm tra cấu hình trước khi chạy.'
+$warningLabel.Text = 'Lưu ý: cleanup/format/eject có thể thay đổi dữ liệu trên USB. Hãy kiểm tra cấu hình trước khi chạy. ForceMultiThreadUsb có thể gây over speed đối với thẻ usb cũ, dễ gây lỗi copy giữa chừng, cần test!'
 $warningLabel.ForeColor = [System.Drawing.Color]::DarkGoldenrod; $warningLabel.AutoSize = $true; $warningLabel.Dock = 'Fill'
 [void]$settings.Controls.Add($warningLabel, 0, 8); $settings.SetColumnSpan($warningLabel, 4)
 
@@ -529,7 +542,7 @@ $consoleText.BackColor = [System.Drawing.Color]::Black; $consoleText.ForeColor =
 $bottom = New-Object System.Windows.Forms.FlowLayoutPanel
 $bottom.Dock = 'Fill'; $bottom.Padding = New-Object System.Windows.Forms.Padding(8, 4, 8, 4); $bottom.AutoSize = $true
 [void]$mainLayout.Controls.Add($bottom, 0, 2)
-$runButton = New-Object System.Windows.Forms.Button; $runButton.Text = 'Chạy copy'; $runButton.Width = 115; $runButton.Add_Click({ Start-MasterRun })
+$runButton = New-Object System.Windows.Forms.Button; $runButton.Text = 'Chạy Flow'; $runButton.Width = 115; $runButton.Add_Click({ Start-MasterRun })
 $stopButton = New-Object System.Windows.Forms.Button; $stopButton.Text = 'Dừng'; $stopButton.Width = 90; $stopButton.Enabled = $false; $stopButton.Add_Click({ Stop-MasterRun })
 $exitButton = New-Object System.Windows.Forms.Button; $exitButton.Text = 'Thoát'; $exitButton.Width = 90; $exitButton.Add_Click({ Close-Gui })
 $statusLabel = New-Object System.Windows.Forms.Label; $statusLabel.Text = 'Sẵn sàng'; $statusLabel.AutoSize = $true; $statusLabel.Margin = New-Object System.Windows.Forms.Padding(12, 8, 8, 3)

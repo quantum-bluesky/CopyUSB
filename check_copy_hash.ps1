@@ -95,6 +95,9 @@ if (-not (Test-Path $SourceRoot)) {
     exit 1
 }
 
+# Cho phép truyền một chuỗi comma-separated, ví dụ: 'F:, G:, H:'
+$DestDrives = @($DestDrives | ForEach-Object { $_ -split '[,;\s]+' } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+
 # Chuẩn hoá ổ
 $DestDrives = $DestDrives | ForEach-Object {
     ($_ -replace '\\','').TrimEnd(':') + ':'

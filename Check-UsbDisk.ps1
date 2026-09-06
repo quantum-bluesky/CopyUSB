@@ -1,5 +1,5 @@
 param(
-    [ValidatePattern("^[A-Za-z]:?$")]
+    [ValidatePattern("^[A-Za-z]:?(\s*[,;]\s*[A-Za-z]:?)*$")]
     [string[]]$DestDrives = @("F:", "G:", "H:", "I:", "J:", "K:", "L:", "M:"),
 
     [switch]$Fix,
@@ -399,6 +399,7 @@ if ($h -or $Help) {
     exit 0
 }
 
+$DestDrives = @($DestDrives | ForEach-Object { $_ -split '[,;\s]+' } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 $DestDrives = $DestDrives | ForEach-Object { Normalize-DriveLetter $_ } | Select-Object -Unique
 
 if ($Fix -and -not (Test-IsAdministrator)) {

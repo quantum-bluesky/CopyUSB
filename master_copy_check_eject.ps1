@@ -1044,6 +1044,7 @@ else {
     Write-Log "Bỏ qua bước EJECT (SkipEject được bật)." "WARN"
 }
 
+$DestDrives = @($DestDrives | ForEach-Object { $_ -split '[,;\s]+' } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 if (-not $DestDrives -or $DestDrives.Count -eq 0) {
     Write-Log "Không có ổ đích nào được chỉ định." "ERROR"
     exit 1
