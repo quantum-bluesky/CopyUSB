@@ -16,6 +16,9 @@
     # Tự động check & sort sau khi copy - check xong
     [bool]$CheckAndSort = $true,
 
+    # Bật/tắt bước check_copy_hash sau khi copy
+    [bool]$EnableCheck = $true,
+
 
     # Tham số cho bước CHECK
     [switch]$EnableHash = $true,       # bật check hash
@@ -48,7 +51,10 @@
     # Bo qua buoc Eject
     [switch]$SkipEject,
     # Buoc copy chi su dung 1 thread de tránh lỗi cho USB
-    [switch]$ForceMultiThreadUsb
+    [switch]$ForceMultiThreadUsb,
+
+    # Không dừng ở màn hình console khi GUI điều khiển tiến trình
+    [switch]$NoPause
 )
 
 Set-StrictMode -Version Latest
@@ -111,7 +117,8 @@ if (-not $script:IsAdmin) {
 
         $shellExe = if (Get-Command pwsh.exe -ErrorAction SilentlyContinue) { "pwsh.exe" } else { "powershell.exe" }
         $baseArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $scriptPath)
-        Start-Process $shellExe -ArgumentList ($baseArgs + $allArgs) -Verb RunAs
+        # Chờ tiến trình elevated kết thúc để GUI/console cha không báo xong sớm.
+        Start-Process $shellExe -ArgumentList ($baseArgs + $allArgs) -Verb RunAs -Wait
         exit
     }
 }
@@ -972,7 +979,7 @@ $script:LogBaseName = [System.IO.Path]::GetFileNameWithoutExtension($script:LogF
 Write-Log "===== BẮT ĐẦU QUY TRÌNH COPY - CHECK - EJECT ====="
 # ================== KIỂM TRA THAM SỐ CƠ BẢN ==================
 
-if (-not (Test-Path $SourceRoot)) {
+if (-not (Test-Path -LiteralPath $SourceRoot -PathType Container)) {
     Write-Log "Thư mục nguồn không tồn tại: $SourceRoot" "ERROR"
     Write-Host ""
     Write-Host "Vui lòng kiểm tra lại tham số -SourceRoot." -ForegroundColor Red
@@ -980,15 +987,15 @@ if (-not (Test-Path $SourceRoot)) {
 }
 # Chuẩn hóa SourceRoot: bỏ nháy thừa, chuyển thành full path
 $SourceRoot = $SourceRoot.Trim('"')
-$SourceRoot = (Resolve-Path $SourceRoot).ProviderPath
+$SourceRoot = (Resolve-Path -LiteralPath $SourceRoot).ProviderPath
 
 # Validate script CHECK
-if ($script:CheckPathIsEmpty) {
+if ($EnableCheck -and $script:CheckPathIsEmpty) {
     Write-Log "CheckScriptPath rỗng. Vui lòng chỉ định đường dẫn hợp lệ." "ERROR"
     exit 1
 }
 
-if (-not (Test-Path $CheckScriptPath)) {
+if ($EnableCheck -and -not (Test-Path -LiteralPath $CheckScriptPath -PathType Leaf)) {
     Write-Log "Script CHECK không tồn tại: $CheckScriptPath" "ERROR"
     exit 1
 }
@@ -1054,6 +1061,7 @@ Write-Host "DestDrives      : $($DestDrives -join ', ')"
 Write-Host "CheckScriptPath : $CheckScriptPath"
 Write-Host "SortScriptPath  : $SortScriptPath"
 Write-Host "CheckAndSort    : $CheckAndSort"
+Write-Host "EnableCheck     : $EnableCheck"
 Write-Host "CheckDiskBefore : $($CheckDiskBeforeCopy.IsPresent)"
 Write-Host "FixDiskErrors   : $($FixDiskErrors.IsPresent)"
 Write-Host "DiskCheckScript : $DiskCheckScriptPath"
@@ -1125,10 +1133,11 @@ function Get-SourceSize {
         Write-Log "Không parse được dung lượng từ robocopy, fallback sang Get-ChildItem (follow symlink nếu có)." "WARN"
 
         $gciParams = @{
-            Path    = $Path
-            Recurse = $true
-            File    = $true
-            Force   = $true
+            LiteralPath = $Path
+            Recurse     = $true
+            File        = $true
+            Force       = $true
+            ErrorAction = 'Stop'
         }
 
         $gciCmd = Get-Command Get-ChildItem
@@ -1136,8 +1145,19 @@ function Get-SourceSize {
             $gciParams['FollowSymlink'] = $true
         }
 
-        $files = Get-ChildItem @gciParams
-        $bytes = ($files | Measure-Object Length -Sum).Sum
+        try {
+            $files = @(Get-ChildItem @gciParams)
+            if ($files.Count -gt 0) {
+                $measure = $files | Measure-Object -Property Length -Sum
+                if ($null -ne $measure -and $null -ne $measure.Sum) {
+                    $bytes = [int64]$measure.Sum
+                }
+            }
+        }
+        catch {
+            Write-Log ("Không thể đọc danh sách file source bằng Get-ChildItem: {0}" -f $_.Exception.Message) "ERROR"
+            $bytes = 0L
+        }
     }
 
     Write-Log ("Tổng dung lượng source: {0:N0} bytes (~{1:N2} GB)" -f $bytes, ($bytes / 1GB))
@@ -1315,7 +1335,7 @@ foreach ($drv in $ValidTargets) {
 
             $resumeCopy = $false
             $resumeMissingBytes = 0L
-            if (-not $skipCleanup -and $usedPct -ge 0.2) {
+            if ($EnableCheck -and -not $skipCleanup -and $usedPct -ge 0.2) {
                 $destPath = Join-Path $drv (Split-Path $SourceRoot -Leaf)
                 Write-Log ("[RESUME] Pre-format check on {0}..." -f $drv) "WARN" -Drive $drv
                 $resumeInfo = Invoke-PreFormatResumeCheck -DriveLetter $drv -DestPath $destPath
@@ -1553,44 +1573,49 @@ function Invoke-PostCopyFlow {
         Message = ""
     }
 
-    if (-not (Test-Path $CheckScriptPath)) {
-        Write-Log ("Không tìm thấy script CHECK: {0}. Dừng flow ở {1}." -f $CheckScriptPath, $DriveLetter) "ERROR" -Drive $DriveLetter
-        $result.Success = $false
-        $result.Stage = "CHECK"
-        $result.Code = 1
-        $result.Message = "Check script not found."
-        return $result
-    }
+    if ($EnableCheck) {
+        if (-not (Test-Path -LiteralPath $CheckScriptPath -PathType Leaf)) {
+            Write-Log ("Không tìm thấy script CHECK: {0}. Dừng flow ở {1}." -f $CheckScriptPath, $DriveLetter) "ERROR" -Drive $DriveLetter
+            $result.Success = $false
+            $result.Stage = "CHECK"
+            $result.Code = 1
+            $result.Message = "Check script not found."
+            return $result
+        }
 
-    Write-Log ("BẮT ĐẦU BƯỚC CHECK cho ổ {0}..." -f $DriveLetter) -Drive $DriveLetter
-    $driveLog = Get-DriveLogFile -Drive $DriveLetter
-    $checkScriptFull = [System.IO.Path]::GetFullPath($CheckScriptPath)
-    $checkArgs = @(
-        "-NoProfile", "-ExecutionPolicy", "Bypass",
-        "-File", $checkScriptFull,
-        "-SourceRoot", $SourceRoot,
-        "-DestDrives", $DriveLetter,
-        "-NoConfirm",
-        "-NoPause",
-        "-LogFile", $driveLog,
-        "-HashLastN", $HashLastN,
-        "-HashAlgorithm", $HashAlgorithm
-    )
-    if ($EnableHash) { $checkArgs += "-Hash" }
-    Write-Log ("CMD CHECK ({0}): {1} {2}" -f $DriveLetter, $script:ShellExe, ($checkArgs -join " ")) -Drive $DriveLetter
-    $null = & $script:ShellExe @checkArgs
-    $checkCode = $LASTEXITCODE
-    $checkMsg = Get-CheckExitMessage -Code $checkCode
-    if ($checkCode -ne 0) {
-        Write-Log ("CHECK detail: {0}" -f $checkMsg) "ERROR" -Drive $DriveLetter
-        Write-Log ("BƯỚC CHECK lỗi cho ổ {0} (ExitCode={1}). Dừng flow ở ổ này." -f $DriveLetter, $checkCode) "ERROR" -Drive $DriveLetter
-        $result.Success = $false
-        $result.Stage = "CHECK"
-        $result.Code = $checkCode
-        $result.Message = $checkMsg
-        return $result
+        Write-Log ("BẮT ĐẦU BƯỚC CHECK cho ổ {0}..." -f $DriveLetter) -Drive $DriveLetter
+        $driveLog = Get-DriveLogFile -Drive $DriveLetter
+        $checkScriptFull = [System.IO.Path]::GetFullPath($CheckScriptPath)
+        $checkArgs = @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", $checkScriptFull,
+            "-SourceRoot", $SourceRoot,
+            "-DestDrives", $DriveLetter,
+            "-NoConfirm",
+            "-NoPause",
+            "-LogFile", $driveLog,
+            "-HashLastN", $HashLastN,
+            "-HashAlgorithm", $HashAlgorithm
+        )
+        if ($EnableHash) { $checkArgs += "-Hash" }
+        Write-Log ("CMD CHECK ({0}): {1} {2}" -f $DriveLetter, $script:ShellExe, ($checkArgs -join " ")) -Drive $DriveLetter
+        $null = & $script:ShellExe @checkArgs
+        $checkCode = $LASTEXITCODE
+        $checkMsg = Get-CheckExitMessage -Code $checkCode
+        if ($checkCode -ne 0) {
+            Write-Log ("CHECK detail: {0}" -f $checkMsg) "ERROR" -Drive $DriveLetter
+            Write-Log ("BƯỚC CHECK lỗi cho ổ {0} (ExitCode={1}). Dừng flow ở ổ này." -f $DriveLetter, $checkCode) "ERROR" -Drive $DriveLetter
+            $result.Success = $false
+            $result.Stage = "CHECK"
+            $result.Code = $checkCode
+            $result.Message = $checkMsg
+            return $result
+        }
+        Write-Log ("BƯỚC CHECK hoàn tất cho ổ {0}." -f $DriveLetter) -Drive $DriveLetter
     }
-    Write-Log ("BƯỚC CHECK hoàn tất cho ổ {0}." -f $DriveLetter) -Drive $DriveLetter
+    else {
+        Write-Log ("Bỏ qua bước CHECK cho ổ {0} (EnableCheck = false)." -f $DriveLetter) "WARN" -Drive $DriveLetter
+    }
 
     if ($CheckAndSort) {
         if (-not (Test-Path $SortScriptPath)) {
@@ -1950,7 +1975,7 @@ else {
 Write-Log "===== QUY TRÌNH HOÀN THÀNH ====="
 Write-Host ""
 Write-Host "Log file: $script:LogFile" -ForegroundColor Cyan
-if ($overallExitCode -ne 0) {
+if ($overallExitCode -ne 0 -and -not $NoPause) {
     pause 
-    exit $overallExitCode
 }
+exit $overallExitCode

@@ -47,7 +47,44 @@ Hiển thị log màu:
 - **Xanh lục**: thao tác thành công.
 
 
-Tất cả script đều chạy từ PowerShell; không có giao diện đồ họa. Thông số chính được in ra đầu phiên để bạn xác nhận mỗi khi chạy.
+Tất cả script đều chạy từ PowerShell; `CopyUSB-GUI.ps1` cung cấp thêm giao diện
+Windows. Thông số chính được in ra đầu phiên để bạn xác nhận mỗi khi chạy.
+
+### Giao diện Windows và click phải vào folder
+
+Mở GUI bằng lệnh:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\CopyUSB-GUI.ps1
+```
+
+GUI có đầy đủ các tham số của script master, tự quét USB đang mount, mở một
+console PowerShell riêng để theo dõi prompt/output, đồng thời đọc log theo thời
+gian thực trong cửa sổ. Sau khi quy trình kết thúc, GUI vẫn chờ người dùng bấm
+`Thoát`.
+
+Để thêm lệnh vào menu click phải của folder, chạy:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Register-CopyUSBContextMenu.ps1 -Action Install
+```
+
+Hoặc chạy `install_copyusb_context_menu.bat`. Khi click phải vào một folder và
+chọn `CopyUSB: copy folder tới USB`, GUI sẽ mở với folder đó làm `SourceRoot`.
+Đăng ký dùng `HKCU` nên không cần quyền Administrator; gỡ bằng
+`uninstall_copyusb_context_menu.bat` hoặc `-Action Uninstall`.
+
+GUI có các chế độ chạy độc lập:
+
+- `CopyWorkflow`: copy tới USB và dùng các checkbox `check_copy_hash`,
+  `Check-UsbDisk`, `Mp3FatSort` để bật/tắt từng bước.
+- `CheckCopyHash`: chỉ chạy `check_copy_hash.ps1`.
+- `CheckUsbDisk`: chỉ chạy `Check-UsbDisk.ps1`, có thể bật `Fix lỗi disk`.
+- `Mp3FatSort`: chỉ chạy `Mp3FatSort.ps1`, chọn được mode, scope, filter và
+  throttle.
+
+Khi bật `Enable check_copy_hash`, trường `HashLastN` và `HashAlgorithm` được
+  mở để thay đổi. `HashLastN = 0` nghĩa là hash toàn bộ file chung.
 
 ## Hướng dẫn Sử dụng Tính năng
 ### 1. Copy song song nhiều USB và kiểm tra tự động
