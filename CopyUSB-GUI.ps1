@@ -370,16 +370,20 @@ $mainLayout = New-Object System.Windows.Forms.TableLayoutPanel
 $mainLayout.Dock = 'Fill'
 $mainLayout.ColumnCount = 1
 $mainLayout.RowCount = 3
-[void]$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('AutoSize')))
+[void]$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Absolute', 360)))
 [void]$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Percent', 100)))
 [void]$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('AutoSize')))
 [void]$form.Controls.Add($mainLayout)
 $settingsPanel = New-Object System.Windows.Forms.Panel
 $settingsPanel.Dock = 'Fill'
+$settingsPanel.AutoScroll = $true
 $settingsPanel.Padding = New-Object System.Windows.Forms.Padding(8)
 [void]$mainLayout.Controls.Add($settingsPanel, 0, 0)
 $settings = New-Object System.Windows.Forms.TableLayoutPanel
-$settings.Dock = 'Fill'
+$settings.Dock = 'Top'
+$settings.AutoSize = $true
+$settings.AutoSizeMode = 'GrowAndShrink'
+$settings.MinimumSize = New-Object System.Drawing.Size(980, 0)
 $settings.ColumnCount = 4
 $settings.RowCount = 9
 [void]$settings.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 145)))
@@ -412,6 +416,7 @@ $remountDriveCombo.DropDownStyle = 'DropDownList'
 [void]$remountDriveCombo.Items.AddRange(@('0', '1'))
 $remountDriveCombo.SelectedItem = [string]$RemountDrive
 $remountDriveCombo.Dock = 'Fill'
+$remountDriveCombo.Enabled = $false
 $runModeCombo = New-Object System.Windows.Forms.ComboBox
 $runModeCombo.DropDownStyle = 'DropDownList'
 [void]$runModeCombo.Items.AddRange(@('CopyWorkflow', 'CheckCopyHash', 'CheckUsbDisk', 'Mp3FatSort'))
@@ -454,19 +459,19 @@ function Add-FieldRow {
     if ($null -ne $Extra) { [void]$settings.Controls.Add($Extra, $Column + 2, $Row) }
 }
 Add-FieldRow 0 'SourceRoot' $sourceText 0 $browseSourceButton
-Add-FieldRow 0 'DestDrives (USB)' $destText 2 $scanButton
-Add-FieldRow 1 'CheckScriptPath' $checkScriptText 0
-Add-FieldRow 1 'SortScriptPath' $sortScriptText 2
-Add-FieldRow 2 'DiskCheckScriptPath' $diskCheckScriptText 0
-Add-FieldRow 2 'EjectScriptPath' $ejectScriptText 2
-Add-FieldRow 3 'RemountScriptPath' $remountScriptText 0
-Add-FieldRow 3 'RemountCachePath' $remountCacheText 2
-Add-FieldRow 4 'LogDir' $logDirText 0 $browseLogButton
-Add-FieldRow 4 'HashLastN (0=all)' $hashLastNText 2
-Add-FieldRow 5 'HashAlgorithm' $hashAlgorithmCombo 0
-Add-FieldRow 5 'RemountDrive' $remountDriveCombo 2
-Add-FieldRow 6 'Chế độ chạy' $runModeCombo 0
-Add-FieldRow 6 'Sort mode độc lập' $sortModeCombo 2
+Add-FieldRow 1 'DestDrives (USB)' $destText 0 $scanButton
+Add-FieldRow 2 'CheckScriptPath' $checkScriptText 0
+Add-FieldRow 2 'SortScriptPath' $sortScriptText 2
+Add-FieldRow 3 'DiskCheckScriptPath' $diskCheckScriptText 0
+Add-FieldRow 3 'EjectScriptPath' $ejectScriptText 2
+Add-FieldRow 4 'RemountScriptPath' $remountScriptText 0
+Add-FieldRow 4 'RemountCachePath' $remountCacheText 2
+Add-FieldRow 5 'LogDir' $logDirText 0 $browseLogButton
+Add-FieldRow 6 'HashLastN (0=all)' $hashLastNText 2
+Add-FieldRow 6 'HashAlgorithm' $hashAlgorithmCombo 0
+Add-FieldRow 7 'Chế độ chạy' $runModeCombo 0
+# Add-FieldRow 7 'RemountDrive' $remountDriveCombo 2
+Add-FieldRow 7 'Sort mode độc lập' $sortModeCombo 2
 
 function New-CheckBox { param([string]$Text, [bool]$Checked); $box = New-Object System.Windows.Forms.CheckBox; $box.Text = $Text; $box.Checked = $Checked; $box.AutoSize = $true; return $box }
 $checkCopyToolCheck = New-CheckBox 'Enable check_copy_hash' $EnableCheck
@@ -489,10 +494,10 @@ $checks.Dock = 'Fill'; $checks.AutoSize = $true; $checks.WrapContents = $true
 [void]$checks.Controls.Add((New-Label 'Throttle'))
 [void]$checks.Controls.Add($throttleText)
 [void]$checks.Controls.Add($checkCopyToolCheck)
-[void]$checks.Controls.Add($sortToolCheck)
 [void]$checks.Controls.Add($enableHashCheck)
 [void]$checks.Controls.Add($diskToolCheck)
 [void]$checks.Controls.Add($fixDiskCheck)
+[void]$checks.Controls.Add($sortToolCheck)
 [void]$checks.Controls.Add($sortForceCheck)
 [void]$checks.Controls.Add($sortNoParallelCheck)
 [void]$checks.Controls.Add($autoYesCheck)
@@ -501,9 +506,11 @@ $checks.Dock = 'Fill'; $checks.AutoSize = $true; $checks.WrapContents = $true
 [void]$checks.Controls.Add($showConsoleCheck)
 $hashLastNText.Enabled = $checkCopyToolCheck.Checked
 $hashAlgorithmCombo.Enabled = $checkCopyToolCheck.Checked
+$enableHashCheck.Enabled = $checkCopyToolCheck.Checked
 $checkCopyToolCheck.Add_CheckedChanged({
     $hashLastNText.Enabled = $checkCopyToolCheck.Checked
     $hashAlgorithmCombo.Enabled = $checkCopyToolCheck.Checked
+    $enableHashCheck.Enabled = $checkCopyToolCheck.Checked
 })
 [void]$settings.Controls.Add($checks, 0, 7); $settings.SetColumnSpan($checks, 4)
 $warningLabel = New-Object System.Windows.Forms.Label
@@ -533,7 +540,13 @@ $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 500
 $timer.Add_Tick({ Read-RunLog; Complete-RunIfNeeded })
 $timer.Start()
+$form.Add_Resize({
+    if ($settingsPanel.ClientSize.Width -gt 20) {
+        $settings.Width = [Math]::Max(980, $settingsPanel.ClientSize.Width - 20)
+    }
+})
 $form.Add_FormClosing({ if ($null -ne $script:RunProcess -and -not $script:RunProcess.HasExited) { $_.Cancel = $true; Close-Gui } })
 Set-RunState $false
+$settings.Width = [Math]::Max(980, $settingsPanel.ClientSize.Width - 20)
 $form.Add_Shown({ $sourceText.Focus() })
 [System.Windows.Forms.Application]::Run($form)
