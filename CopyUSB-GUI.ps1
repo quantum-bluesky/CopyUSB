@@ -619,7 +619,7 @@ $driveButtons.AutoSize = $true
 $driveButtons.WrapContents = $false
 $driveButtons.Margin = New-Object System.Windows.Forms.Padding(0)
 [void]$driveButtons.Controls.Add($scanButton)
-[void]$driveButtons.Controls.Add($ejectButton)
+# [void]$driveButtons.Controls.Add($ejectButton)
 $browseLogButton = New-Object System.Windows.Forms.Button
 $browseLogButton.Text = 'Mở thư mục'
 $browseLogButton.AutoSize = $true
@@ -634,6 +634,7 @@ function Add-FieldRow {
 Add-FieldRow 0 'SourceRoot' $sourceText 0 $browseSourceButton
 $settings.SetColumnSpan($sourceText, 2)
 Add-FieldRow 1 'DestDrives (USB)' $destText 0 $driveButtons
+[void]$settings.Controls.Add($ejectButton, 3, 1)
 Add-FieldRow 2 'CheckScriptPath' $checkScriptText 0
 Add-FieldRow 2 'SortScriptPath' $sortScriptText 2
 Add-FieldRow 3 'DiskCheckScriptPath' $diskCheckScriptText 0

@@ -1,4 +1,4 @@
-# Script copy Data tới nhiều ổ USB
+﻿# Script copy Data tới nhiều ổ USB
 
 Xem hướng dẫn chi tiết ở HUONG_DAN_SU_DUNG.md
 Xem hướng dẫn test ở HUONG_DAN_TEST.md
@@ -8,8 +8,11 @@ Xem hướng dẫn test ở HUONG_DAN_TEST.md
 Chạy `powershell -NoProfile -ExecutionPolicy Bypass -File .\Build-Distribution.ps1 -Version 1.0.0`
 để tạo ZIP trong `dist`. Máy đích giải nén rồi bấm `Install.cmd`; mỗi bản cập nhật
 dùng cùng thao tác. Xem [hướng dẫn cài đặt](distribution/HUONG_DAN_CAI_DAT.md).
-Gói mặc định không kèm YAFS Debug hiện có; dùng `-YafsDirectory` với bản Release
-để đóng gói đầy đủ chức năng sắp xếp FAT.
+Để build YAFS Release và đóng gói đầy đủ, bấm `Build-CopyUSB.cmd` hoặc chạy
+`powershell -NoProfile -ExecutionPolicy Bypass -File .\Build-CopyUSB.ps1 -Version 1.1.0`.
+Bản x86 mặc định liên kết tĩnh Xerces và C++ runtime, không cần DLL Debug trên máy
+người dùng. Xem [hướng dẫn build YAFS](distribution/yafs/README.md).
+`Build-Distribution.ps1` vẫn tạo gói Core nếu không truyền `-YafsDirectory`.
 
 ## Giao diện Windows và context menu
 
