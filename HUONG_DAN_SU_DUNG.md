@@ -63,6 +63,10 @@ console PowerShell riêng để theo dõi prompt/output, đồng thời đọc l
 gian thực trong cửa sổ. Sau khi quy trình kết thúc, GUI vẫn chờ người dùng bấm
 `Thoát`.
 
+Nút `Eject USB` nằm cạnh `Quét USB`, dùng danh sách drive trong ô
+`DestDrives (USB)` để tháo các USB đang chọn. Nút eject bị khóa khi flow đang
+chạy và cửa sổ sẽ yêu cầu chờ nếu tiến trình eject chưa kết thúc.
+
 Để thêm lệnh vào menu click phải của folder, chạy:
 
 ```powershell

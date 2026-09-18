@@ -51,6 +51,7 @@ $script:LastLogPath = $null
 $script:GuiLogPath = $null
 $script:RunStartedAt = $null
 $script:GuiClosing = $false
+$script:EjectProcess = $null
 
 function Resolve-GuiDefault {
     param([AllowEmptyString()][string]$Value, [Parameter(Mandatory)][string]$Fallback)
@@ -237,7 +238,64 @@ function Set-RunState {
     $scanButton.Enabled = -not $Running
     $browseSourceButton.Enabled = -not $Running
     $browseLogButton.Enabled = -not $Running
+    if ($null -ne $ejectButton) {
+        $ejectButton.Enabled = (-not $Running -and $null -eq $script:EjectProcess)
+    }
     $statusLabel.Text = if ($Running) { 'Đang chạy...' } else { 'Sẵn sàng' }
+}
+
+function Start-EjectSelectedUsb {
+    if ($null -ne $script:RunProcess -and -not $script:RunProcess.HasExited) {
+        [System.Windows.Forms.MessageBox]::Show('Không thể eject khi flow đang chạy.', 'CopyUSB', 'OK', 'Warning') | Out-Null
+        return
+    }
+    if ($null -ne $script:EjectProcess -and -not $script:EjectProcess.HasExited) { return }
+
+    $drives = @(Split-DriveText $destText.Text)
+    if ($drives.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show('Hãy nhập hoặc quét ít nhất một USB để eject.', 'CopyUSB', 'OK', 'Warning') | Out-Null
+        return
+    }
+    $ejectPath = $ejectScriptText.Text.Trim()
+    if (-not (Test-Path -LiteralPath $ejectPath -PathType Leaf)) {
+        [System.Windows.Forms.MessageBox]::Show("Không tìm thấy EjectScriptPath: $ejectPath", 'CopyUSB', 'OK', 'Error') | Out-Null
+        return
+    }
+    $shell = Get-Command pwsh.exe -ErrorAction SilentlyContinue
+    if ($null -eq $shell) { $shell = Get-Command powershell.exe -ErrorAction SilentlyContinue }
+    if ($null -eq $shell) {
+        [System.Windows.Forms.MessageBox]::Show('Không tìm thấy PowerShell để eject USB.', 'CopyUSB', 'OK', 'Error') | Out-Null
+        return
+    }
+
+    $driveArgs = ($drives | ForEach-Object { Quote-ProcessArgument $_ }) -join ' '
+    $argText = '-NoProfile -ExecutionPolicy Bypass -File {0} {1}' -f (Quote-ProcessArgument $ejectPath), $driveArgs
+    try {
+        Append-ConsoleText ("[GUI] Bắt đầu eject: {0}" -f ($drives -join ', '))
+        $script:EjectProcess = Start-Process -FilePath $shell.Source -ArgumentList $argText -WorkingDirectory $script:ScriptDir -WindowStyle Normal -PassThru
+        $ejectButton.Enabled = $false
+        $statusLabel.Text = 'Đang eject USB...'
+    }
+    catch {
+        $script:EjectProcess = $null
+        [System.Windows.Forms.MessageBox]::Show("Không thể khởi động eject: $($_.Exception.Message)", 'CopyUSB', 'OK', 'Error') | Out-Null
+    }
+}
+
+function Complete-EjectIfNeeded {
+    if ($null -eq $script:EjectProcess -or -not $script:EjectProcess.HasExited) { return }
+    $exitCode = $script:EjectProcess.ExitCode
+    $script:EjectProcess.Dispose()
+    $script:EjectProcess = $null
+    $ejectButton.Enabled = $true
+    if ($exitCode -eq 0) {
+        Append-ConsoleText '[GUI] Eject USB hoàn tất.'
+        if ($null -eq $script:RunProcess) { $statusLabel.Text = 'Sẵn sàng' }
+    }
+    else {
+        Append-ConsoleText ("[GUI] Eject USB kết thúc với ExitCode={0}." -f $exitCode)
+        if ($null -eq $script:RunProcess) { $statusLabel.Text = "Eject lỗi (ExitCode=$exitCode)." }
+    }
 }
 
 function Complete-RunIfNeeded {
@@ -362,6 +420,10 @@ function New-MasterCommand {
 
 function Start-MasterRun {
     $mode = [string]$runModeCombo.SelectedItem
+    if ($null -ne $script:EjectProcess -and -not $script:EjectProcess.HasExited) {
+        [System.Windows.Forms.MessageBox]::Show('Đang eject USB. Hãy chờ eject hoàn tất trước khi chạy flow.', 'CopyUSB', 'OK', 'Warning') | Out-Null
+        return
+    }
     if ($mode -in @('CopyWorkflow', 'SyncWorkflow') -and -not (Test-Path -LiteralPath $script:MasterScriptPath -PathType Leaf)) {
         [System.Windows.Forms.MessageBox]::Show("Không tìm thấy script: $script:MasterScriptPath", 'CopyUSB', 'OK', 'Error') | Out-Null
         return
@@ -434,6 +496,10 @@ function Close-Gui {
         if ($answer -ne 'Yes') { return }
         Stop-GuiProcessTree -RootProcessId ([int]$script:RunProcess.Id)
         Append-ConsoleText '[GUI] Đã đóng process chạy và các process con trước khi thoát.'
+    }
+    if ($null -ne $script:EjectProcess -and -not $script:EjectProcess.HasExited) {
+        [System.Windows.Forms.MessageBox]::Show('Hãy chờ eject USB hoàn tất trước khi thoát.', 'CopyUSB', 'OK', 'Warning') | Out-Null
+        return
     }
     $script:GuiClosing = $true
     if ($null -ne $timer) { $timer.Stop() }
@@ -532,6 +598,16 @@ $scanButton = New-Object System.Windows.Forms.Button
 $scanButton.Text = 'Quét USB'
 $scanButton.AutoSize = $true
 $scanButton.Add_Click({ $usb = @(Get-UsbDriveLetters); if ($usb.Count -gt 0) { $destText.Text = $usb -join ', ' } else { [System.Windows.Forms.MessageBox]::Show('Không tìm thấy USB đang mount.', 'CopyUSB', 'OK', 'Information') | Out-Null } })
+$ejectButton = New-Object System.Windows.Forms.Button
+$ejectButton.Text = 'Eject USB'
+$ejectButton.AutoSize = $true
+$ejectButton.Add_Click({ Start-EjectSelectedUsb })
+$driveButtons = New-Object System.Windows.Forms.FlowLayoutPanel
+$driveButtons.AutoSize = $true
+$driveButtons.WrapContents = $false
+$driveButtons.Margin = New-Object System.Windows.Forms.Padding(0)
+[void]$driveButtons.Controls.Add($scanButton)
+[void]$driveButtons.Controls.Add($ejectButton)
 $browseLogButton = New-Object System.Windows.Forms.Button
 $browseLogButton.Text = 'Mở thư mục'
 $browseLogButton.AutoSize = $true
@@ -545,7 +621,7 @@ function Add-FieldRow {
 }
 Add-FieldRow 0 'SourceRoot' $sourceText 0 $browseSourceButton
 $settings.SetColumnSpan($sourceText, 2)
-Add-FieldRow 1 'DestDrives (USB)' $destText 0 $scanButton
+Add-FieldRow 1 'DestDrives (USB)' $destText 0 $driveButtons
 Add-FieldRow 2 'CheckScriptPath' $checkScriptText 0
 Add-FieldRow 2 'SortScriptPath' $sortScriptText 2
 Add-FieldRow 3 'DiskCheckScriptPath' $diskCheckScriptText 0
@@ -645,7 +721,7 @@ foreach ($control in @($runButton, $stopButton, $exitButton, $statusLabel, $logP
 
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 500
-$timer.Add_Tick({ Read-RunLog; Complete-RunIfNeeded })
+$timer.Add_Tick({ Read-RunLog; Complete-RunIfNeeded; Complete-EjectIfNeeded })
 $timer.Start()
 $form.Add_Resize({
     if ($settingsPanel.ClientSize.Width -gt 20) {
@@ -653,7 +729,9 @@ $form.Add_Resize({
     }
 })
 $form.Add_FormClosing({
-    if (-not $script:GuiClosing -and $null -ne $script:RunProcess -and -not $script:RunProcess.HasExited) {
+    $runActive = ($null -ne $script:RunProcess -and -not $script:RunProcess.HasExited)
+    $ejectActive = ($null -ne $script:EjectProcess -and -not $script:EjectProcess.HasExited)
+    if (-not $script:GuiClosing -and ($runActive -or $ejectActive)) {
         $_.Cancel = $true
         Close-Gui
     }

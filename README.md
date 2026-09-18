@@ -20,6 +20,10 @@ Hoặc chạy `install_copyusb_context_menu.bat`. Sau đó click phải vào fol
 chọn `CopyUSB: copy folder tới USB`; GUI sẽ tự điền folder nguồn và quét các
 USB đang mount. Dùng `uninstall_copyusb_context_menu.bat` để gỡ lệnh.
 
+Trong GUI, nút `Eject USB` nằm cạnh `Quét USB` và eject toàn bộ drive đang có
+trong ô `DestDrives (USB)`. Nút này tự khóa trong lúc flow đang chạy; GUI cũng
+không cho đóng cửa sổ khi tiến trình eject chưa hoàn tất.
+
 Trong GUI, `Chế độ chạy` cho phép chọn `CopyWorkflow`, chỉ chạy
 `check_copy_hash`, chỉ chạy `Check-UsbDisk`, hoặc chỉ chạy `Mp3FatSort`.
 `HashLastN` chỉ bật khi `Enable check_copy_hash` được chọn.
