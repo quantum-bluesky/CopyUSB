@@ -27,7 +27,10 @@
     [switch]$NoPause,
 
     # Ghi log vào file (nếu có)
-    [string]$LogFile
+    [string]$LogFile,
+
+    # Chỉ kiểm tra các đường dẫn tương đối nằm trong manifest đồng bộ
+    [string]$OnlyFilesPath
 )
 
 Set-StrictMode -Version Latest
@@ -74,6 +77,7 @@ function Show-Help {
     Write-Host "  -NoConfirm               : Không hỏi lại cấu hình."
     Write-Host "  -NoPause                 : Không chờ Enter cuối script."
     Write-Host "  -LogFile     <path>      : Ghi log vào file chỉ định."
+    Write-Host "  -OnlyFilesPath <path>    : Chỉ check các file tương đối trong manifest."
     Write-Host "  -h / -Help               : Hiển thị hướng dẫn này."
     Write-Host ""
     Write-Host "Ví dụ:" -ForegroundColor Yellow
@@ -164,7 +168,7 @@ $jobs = @()
 $summaries = @()
 
 foreach ($drv in $DestDrives) {
-    $jobs += Start-Job -ArgumentList $drv, $SourceRoot, $srcList, $Hash, $HashAlgorithm, $HashLastN, $srcCount, $srcSize, $LogFile -ScriptBlock {
+    $jobs += Start-Job -ArgumentList $drv, $SourceRoot, $srcList, $Hash, $HashAlgorithm, $HashLastN, $srcCount, $srcSize, $LogFile, $OnlyFilesPath -ScriptBlock {
         param(
             $drv,
             $SourceRoot,
@@ -174,7 +178,8 @@ foreach ($drv in $DestDrives) {
             $HashLastN,
             $srcCount,
             $srcSize,
-            $LogFile
+            $LogFile,
+            $OnlyFilesPath
         )
 
         Set-StrictMode -Version Latest
@@ -504,6 +509,40 @@ namespace CopyUsb {
             $summary.ErrorMessage = "Lỗi Get-ChildItem đích."
             Write-Output $summary
             return
+        }
+
+        $onlyFilesActive = -not [string]::IsNullOrWhiteSpace($OnlyFilesPath)
+        $onlyFiles = @()
+        if ($onlyFilesActive) {
+            if (-not (Test-Path -LiteralPath $OnlyFilesPath -PathType Leaf)) {
+                Write-LogLocal "[$drv] Manifest file không tồn tại: $OnlyFilesPath" "ERROR"
+                $summary.Status = "Error"
+                $summary.ErrorMessage = "Manifest file không tồn tại."
+                Write-Output $summary
+                return
+            }
+
+            $onlyFiles = @(Get-Content -LiteralPath $OnlyFilesPath -Encoding UTF8 -ErrorAction Stop |
+                ForEach-Object {
+                    $rel = ([string]$_).Trim().TrimStart('\\', '/') -replace '/', '\'
+                    if ($rel) { $rel.ToLowerInvariant() }
+                } | Sort-Object -Unique)
+            $allowed = @{}
+            foreach ($rel in $onlyFiles) { $allowed[$rel] = $true }
+            $srcList = @($srcList | Where-Object { $allowed.ContainsKey(([string]$_.RelPath).ToLowerInvariant()) })
+            $dstList = @($dstList | Where-Object { $allowed.ContainsKey(([string]$_.RelPath).ToLowerInvariant()) })
+            $srcMap = @{}
+            foreach ($f in $srcList) { $srcMap[$f.RelPath.ToLowerInvariant()] = $f }
+            $srcCount = $srcList.Count
+            $srcSize = ($srcList | Measure-Object Length -Sum).Sum
+            Write-LogLocal ("[$drv] Scoped check: chỉ kiểm tra {0} file trong manifest {1}." -f $onlyFiles.Count, $OnlyFilesPath)
+
+            if ($onlyFiles.Count -eq 0) {
+                Write-LogLocal "[$drv] Không có file đồng bộ cần check hash; xem như OK." "WARN"
+                $summary.Status = "OK"
+                Write-Output $summary
+                return
+            }
         }
 
         $dstCount = $dstList.Count

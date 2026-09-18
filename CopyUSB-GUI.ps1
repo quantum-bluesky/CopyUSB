@@ -17,8 +17,10 @@
     [string]$RemountCachePath = '',
     [ValidateSet(0, 1)]
     [int]$RemountDrive = 0,
-    [ValidateSet('CopyWorkflow', 'CheckCopyHash', 'CheckUsbDisk', 'Mp3FatSort')]
+    [ValidateSet('CopyWorkflow', 'SyncWorkflow', 'CheckCopyHash', 'CheckUsbDisk', 'Mp3FatSort')]
     [string]$RunMode = 'CopyWorkflow',
+    [ValidateSet('Mirror', 'UpdateOnly')]
+    [string]$SyncMode = 'Mirror',
     [string]$LogDir = '',
     [bool]$AutoYes = $false,
     [bool]$SkipEject = $false,
@@ -315,6 +317,7 @@ function New-ToolCommand {
 }
 
 function New-MasterCommand {
+    $mode = [string]$runModeCombo.SelectedItem
     $parts = New-Object 'System.Collections.Generic.List[string]'
     [void]$parts.Add('&')
     [void]$parts.Add((Quote-PowerShellLiteral $script:MasterScriptPath))
@@ -341,6 +344,8 @@ function New-MasterCommand {
     [void]$parts.Add($(if ($sortToolCheck.Checked) { '$true' } else { '$false' }))
     [void]$parts.Add('-EnableCheck')
     [void]$parts.Add($(if ($checkCopyToolCheck.Checked) { '$true' } else { '$false' }))
+    [void]$parts.Add('-SyncMode')
+    [void]$parts.Add((Quote-PowerShellLiteral ([string]$syncModeCombo.SelectedItem)))
     [void]$parts.Add(($(if ($enableHashCheck.Checked) { '-EnableHash:$true' } else { '-EnableHash:$false' })))
     if ($diskToolCheck.Checked) { [void]$parts.Add('-CheckDiskBeforeCopy') }
     if ($fixDiskCheck.Checked) { [void]$parts.Add('-FixDiskErrors') }
@@ -348,17 +353,18 @@ function New-MasterCommand {
     if ($skipEjectCheck.Checked) { [void]$parts.Add('-SkipEject') }
     if ($forceMultiThreadCheck.Checked) { [void]$parts.Add('-ForceMultiThreadUsb') }
     if ($forceFormatMemoryCardCheck.Checked) { [void]$parts.Add('-ForceFormatMemoryCard') }
+    if ($mode -eq 'SyncWorkflow') { [void]$parts.Add('-SyncWorkflow') }
     [void]$parts.Add('-NoPause')
     return ($parts -join ' ')
 }
 
 function Start-MasterRun {
     $mode = [string]$runModeCombo.SelectedItem
-    if ($mode -eq 'CopyWorkflow' -and -not (Test-Path -LiteralPath $script:MasterScriptPath -PathType Leaf)) {
+    if ($mode -in @('CopyWorkflow', 'SyncWorkflow') -and -not (Test-Path -LiteralPath $script:MasterScriptPath -PathType Leaf)) {
         [System.Windows.Forms.MessageBox]::Show("Không tìm thấy script: $script:MasterScriptPath", 'CopyUSB', 'OK', 'Error') | Out-Null
         return
     }
-    if ($mode -in @('CopyWorkflow', 'CheckCopyHash') -and -not (Test-Path -LiteralPath $sourceText.Text.Trim() -PathType Container)) {
+    if ($mode -in @('CopyWorkflow', 'SyncWorkflow', 'CheckCopyHash') -and -not (Test-Path -LiteralPath $sourceText.Text.Trim() -PathType Container)) {
         [System.Windows.Forms.MessageBox]::Show('SourceRoot không tồn tại hoặc không phải thư mục.', 'CopyUSB', 'OK', 'Warning') | Out-Null
         return
     }
@@ -384,7 +390,7 @@ function Start-MasterRun {
     $script:RunStartedAt = [DateTime]::Now
     $script:LastLogPath = $null
     $script:LogOffset = 0L
-    if ($mode -eq 'CopyWorkflow') {
+    if ($mode -in @('CopyWorkflow', 'SyncWorkflow')) {
         $script:GuiLogPath = $null
     }
     else {
@@ -396,7 +402,7 @@ function Start-MasterRun {
     try {
         # Dùng -Command để các giá trị $true/$false được PowerShell con nhận là
         # Boolean thật; truyền chúng qua -File sẽ biến thành chuỗi và lỗi bind.
-        $commandText = if ($mode -eq 'CopyWorkflow') { New-MasterCommand } else { New-ToolCommand }
+        $commandText = if ($mode -in @('CopyWorkflow', 'SyncWorkflow')) { New-MasterCommand } else { New-ToolCommand }
         $argText = '-NoProfile -ExecutionPolicy Bypass -Command {0}' -f (Quote-ProcessArgument $commandText)
         $windowStyle = if ($showConsoleCheck.Checked) { 'Normal' } else { 'Hidden' }
         $script:RunProcess = Start-Process -FilePath $shell.Source -ArgumentList $argText -WorkingDirectory $script:ScriptDir -WindowStyle $windowStyle -PassThru
@@ -491,9 +497,14 @@ $remountDriveCombo.Dock = 'Fill'
 $remountDriveCombo.Enabled = $false
 $runModeCombo = New-Object System.Windows.Forms.ComboBox
 $runModeCombo.DropDownStyle = 'DropDownList'
-[void]$runModeCombo.Items.AddRange(@('CopyWorkflow', 'CheckCopyHash', 'CheckUsbDisk', 'Mp3FatSort'))
+[void]$runModeCombo.Items.AddRange(@('CopyWorkflow', 'SyncWorkflow', 'CheckCopyHash', 'CheckUsbDisk', 'Mp3FatSort'))
 $runModeCombo.SelectedItem = $RunMode
 $runModeCombo.Dock = 'Fill'
+$syncModeCombo = New-Object System.Windows.Forms.ComboBox
+$syncModeCombo.DropDownStyle = 'DropDownList'
+[void]$syncModeCombo.Items.AddRange(@('Mirror', 'UpdateOnly'))
+$syncModeCombo.SelectedItem = $SyncMode
+$syncModeCombo.Dock = 'Fill'
 $sortModeCombo = New-Object System.Windows.Forms.ComboBox
 $sortModeCombo.DropDownStyle = 'DropDownList'
 [void]$sortModeCombo.Items.AddRange(@('CheckOnly', 'SortOnlyAuto', 'CheckAndSort'))
@@ -543,6 +554,7 @@ Add-FieldRow 5 'LogDir' $logDirText 0 $browseLogButton
 Add-FieldRow 6 'HashLastN (0=all)' $hashLastNText 2
 Add-FieldRow 6 'HashAlgorithm' $hashAlgorithmCombo 0
 Add-FieldRow 7 'Chế độ chạy' $runModeCombo 0
+Add-FieldRow 7 'Chế độ Sync' $syncModeCombo 2
 # Add-FieldRow 7 'RemountDrive' $remountDriveCombo 2
 
 function New-CheckBox { param([string]$Text, [bool]$Checked); $box = New-Object System.Windows.Forms.CheckBox; $box.Text = $Text; $box.Checked = $Checked; $box.AutoSize = $true; return $box }
@@ -580,6 +592,10 @@ $checks.Dock = 'Fill'; $checks.AutoSize = $true; $checks.WrapContents = $true
 [void]$checks.Controls.Add($forceMultiThreadCheck)
 [void]$checks.Controls.Add($forceFormatMemoryCardCheck)
 [void]$checks.Controls.Add($showConsoleCheck)
+$syncModeCombo.Enabled = ([string]$runModeCombo.SelectedItem -eq 'SyncWorkflow')
+$runModeCombo.Add_SelectedIndexChanged({
+    $syncModeCombo.Enabled = ([string]$runModeCombo.SelectedItem -eq 'SyncWorkflow')
+})
 $hashLastNText.Enabled = $checkCopyToolCheck.Checked
 $hashAlgorithmCombo.Enabled = $checkCopyToolCheck.Checked
 $enableHashCheck.Enabled = $checkCopyToolCheck.Checked

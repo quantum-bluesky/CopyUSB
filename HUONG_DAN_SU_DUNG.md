@@ -78,6 +78,10 @@ GUI có các chế độ chạy độc lập:
 
 - `CopyWorkflow`: copy tới USB và dùng các checkbox `check_copy_hash`,
   `Check-UsbDisk`, `Mp3FatSort` để bật/tắt từng bước.
+- `SyncWorkflow`: đồng bộ incremental từ source sang đích, check hash chỉ các
+  file `.mp3` có trong manifest vừa đồng bộ, sau đó chạy `CheckAndSort`. Mặc
+  định `SyncMode=Mirror` dùng robocopy `/MIR` để xóa file/thư mục dư ở đích;
+  chọn `UpdateOnly` nếu muốn giữ file dư.
 - `CheckCopyHash`: chỉ chạy `check_copy_hash.ps1`.
 - `CheckUsbDisk`: chỉ chạy `Check-UsbDisk.ps1`, có thể bật `Fix lỗi disk`.
 - `Mp3FatSort`: chỉ chạy `Mp3FatSort.ps1`, chọn được mode, scope, filter và
@@ -120,6 +124,7 @@ Khi bật `Enable check_copy_hash`, trường `HashLastN` và `HashAlgorithm` đ
 - Dùng `-AutoYes` khi đã kiểm thử ổn định để chạy không cần canh prompt (khi đó sẽ tự động xóa / format ổ)
 - Mặc định chỉ dùng 1 thread copy duy nhất, theo như kinh nghiệm thực tế khi thread copy > 1 sẽ gặp nhiều lỗi copy & nhanh hỏng thẻ.
 - Với USB/thẻ nhớ removable dưới 64GB, có thể bật `-ForceFormatMemoryCard` để ép format trước khi copy; thiết bị trên 32GB sẽ dùng exFAT. Tùy chọn này xóa toàn bộ dữ liệu trên ổ, cần xác nhận nếu không dùng `-AutoYes`.
+- Có thể chạy riêng flow đồng bộ bằng: `.master_copy_check_eject.ps1 -SyncWorkflow -SyncMode Mirror -SourceRoot "D:\DuLieuNguon" -DestDrives F:,G:`. `Mirror` xóa file dư ở đích; `UpdateOnly` chỉ cập nhật file từ nguồn.
 - Khi nhấn `Ctrl+C`, đóng console PowerShell hoặc đóng GUI, master/GUI sẽ cố gắng dừng toàn bộ process con đang chạy (đặc biệt robocopy) theo cây process.
 
 Ví dụ bật check/fix thẻ nhớ trước khi copy:

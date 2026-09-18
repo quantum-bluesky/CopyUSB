@@ -25,5 +25,7 @@ Trong GUI, `Chế độ chạy` cho phép chọn `CopyWorkflow`, chỉ chạy
 `HashLastN` chỉ bật khi `Enable check_copy_hash` được chọn.
 Checkbox `Force format USB/thẻ nhớ <64GB` bật `-ForceFormatMemoryCard`; thiết bị
 removable dưới 64GB sẽ được format trước khi copy (trên 32GB dùng exFAT).
+Khi chọn `SyncWorkflow`, `SyncMode=Mirror` là mặc định và dùng `/MIR` để xóa
+file/thư mục dư ở đích; có thể đổi sang `UpdateOnly` để giữ lại dữ liệu dư.
 Khi dừng bằng `Ctrl+C`, đóng console PowerShell hoặc đóng GUI, process chạy và
 các process con sẽ được dọn theo cây PID.

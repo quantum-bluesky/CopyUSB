@@ -58,7 +58,12 @@
     [switch]$ForceFormatMemoryCard,
 
     # Không dừng ở màn hình console khi GUI điều khiển tiến trình
-    [switch]$NoPause
+    [switch]$NoPause,
+
+    # Flow riêng: đồng bộ incremental source -> destination, chỉ check các file đã sync, rồi sort
+    [switch]$SyncWorkflow,
+    [ValidateSet('Mirror', 'UpdateOnly')]
+    [string]$SyncMode = 'Mirror'
 )
 
 Set-StrictMode -Version Latest
@@ -1180,6 +1185,7 @@ Write-Host "CheckScriptPath : $CheckScriptPath"
 Write-Host "SortScriptPath  : $SortScriptPath"
 Write-Host "CheckAndSort    : $CheckAndSort"
 Write-Host "EnableCheck     : $EnableCheck"
+Write-Host "SyncMode        : $SyncMode (Mirror = xóa file dư ở đích)"
 Write-Host "ForceFormatCard : $ForceFormatMemoryCard (threshold < $([Math]::Round($script:MemoryCardThresholdBytes / 1GB, 0))GB)"
 Write-Host "CheckDiskBefore : $($CheckDiskBeforeCopy.IsPresent)"
 Write-Host "FixDiskErrors   : $($FixDiskErrors.IsPresent)"
@@ -1318,7 +1324,7 @@ foreach ($drv in $DestDrives) {
             Write-Log "Ổ $upper có Size=0 (có thể không có thẻ nhớ). Bỏ qua." "WARN" -Drive $upper
             continue
         }
-        if ($disk.Size -lt $sourceSize) {
+        if (-not $SyncWorkflow -and $disk.Size -lt $sourceSize) {
             Write-Log ("Ổ {0} có Size {1:N2}GB nhỏ hơn dung lượng source {2:N2}GB. Bỏ qua." -f $upper, ($disk.Size / 1GB), ($sourceSize / 1GB)) "WARN" -Drive $upper
             continue
         }
@@ -1335,7 +1341,10 @@ if ($ValidTargets.Count -eq 0) {
     exit 1
 }
 # ================== CAPTURE THONG TIN REMOUNT ==================
-if (-not $script:RemountDriveEnabled) {
+if ($SyncWorkflow) {
+    Write-Log "SyncWorkflow: bỏ qua capture/remount; flow chỉ đồng bộ, check hash scoped và sort." "WARN"
+}
+elseif (-not $script:RemountDriveEnabled) {
     Write-Log "RemountDrive=0 -> bỏ qua capture thông tin remount và tự động remount." "WARN"
 }
 elseif ($script:RemountScriptIsEmpty -or $script:RemountCacheIsEmpty) {
@@ -1373,7 +1382,7 @@ $LargeUsb = @($ValidTargets | Where-Object {
         $usbMap[$_].Size -ge (16GB)
     })
 
-if ($LargeUsb.Count -gt 0 -and -not $AutoYes) {
+if (-not $SyncWorkflow -and $LargeUsb.Count -gt 0 -and -not $AutoYes) {
     Write-Host ""
     Write-Host "CẢNH BÁO: các ổ USB sau có dung lượng >= 16GB, có thể bị XOÁ/FORMAT:" -ForegroundColor Yellow
     $LargeUsb | ForEach-Object {
@@ -1407,6 +1416,7 @@ if ($ValidTargets.Count -eq 0) {
 $PreparedTargets = @()
 $MirrorTargets = @()
 
+if (-not $SyncWorkflow) {
 foreach ($drv in $ValidTargets) {
     $diskCheckResult = Invoke-DriveDiskCheck -DriveLetter $drv
     if (-not $diskCheckResult.Success) {
@@ -1588,8 +1598,9 @@ foreach ($drv in $ValidTargets) {
     Write-Log ("Ổ {0} đủ điều kiện để copy." -f $drv) -Drive $drv
     $PreparedTargets += $drv
 }
+}
 
-if ($PreparedTargets.Count -eq 0) {
+if (-not $SyncWorkflow -and $PreparedTargets.Count -eq 0) {
     Write-Log "Không còn ổ nào đủ điều kiện để copy sau khi đánh giá dung lượng & dữ liệu." "ERROR"
     exit 1
 }
@@ -1698,7 +1709,11 @@ function Start-CopyProcess {
 
 function Invoke-PostCopyFlow {
     param(
-        [string]$DriveLetter
+        [string]$DriveLetter,
+        [string]$OnlyFilesPath = '',
+        [switch]$ForceHash,
+        [switch]$ForceSort,
+        [switch]$SkipEjectAfterFlow
     )
 
     $result = [PSCustomObject]@{
@@ -1709,7 +1724,7 @@ function Invoke-PostCopyFlow {
         Message = ""
     }
 
-    if ($EnableCheck) {
+    if ($EnableCheck -or $ForceHash) {
         if (-not (Test-Path -LiteralPath $CheckScriptPath -PathType Leaf)) {
             Write-Log ("Không tìm thấy script CHECK: {0}. Dừng flow ở {1}." -f $CheckScriptPath, $DriveLetter) "ERROR" -Drive $DriveLetter
             $result.Success = $false
@@ -1733,7 +1748,11 @@ function Invoke-PostCopyFlow {
             "-HashLastN", $HashLastN,
             "-HashAlgorithm", $HashAlgorithm
         )
-        if ($EnableHash) { $checkArgs += "-Hash" }
+        if ($ForceHash -or $EnableHash) { $checkArgs += "-Hash" }
+        if (-not [string]::IsNullOrWhiteSpace($OnlyFilesPath)) {
+            $checkArgs += @("-OnlyFilesPath", $OnlyFilesPath)
+            Write-Log ("CHECK scoped theo manifest: {0}" -f $OnlyFilesPath) -Drive $DriveLetter
+        }
         Write-Log ("CMD CHECK ({0}): {1} {2}" -f $DriveLetter, $script:ShellExe, ($checkArgs -join " ")) -Drive $DriveLetter
         $null = & $script:ShellExe @checkArgs
         $checkCode = $LASTEXITCODE
@@ -1753,7 +1772,7 @@ function Invoke-PostCopyFlow {
         Write-Log ("Bỏ qua bước CHECK cho ổ {0} (EnableCheck = false)." -f $DriveLetter) "WARN" -Drive $DriveLetter
     }
 
-    if ($CheckAndSort) {
+    if ($CheckAndSort -or $ForceSort) {
         if (-not (Test-Path $SortScriptPath)) {
             Write-Log ("Không tìm thấy script SORT: {0}. Dừng flow ở {1}." -f $SortScriptPath, $DriveLetter) "ERROR" -Drive $DriveLetter
             $result.Success = $false
@@ -1789,6 +1808,10 @@ function Invoke-PostCopyFlow {
         Write-Log ("BƯỚC SORT hoàn tất cho ổ {0}." -f $DriveLetter) -Drive $DriveLetter
     }
 
+    if ($SkipEjectAfterFlow) {
+        Write-Log ("Bỏ qua EJECT cho ổ {0}: SyncWorkflow kết thúc sau CHECK & SORT." -f $DriveLetter) "WARN" -Drive $DriveLetter
+        return $result
+    }
     if ($script:SkipEjectEffective) {
         Write-Log ("Bỏ qua bước EJECT cho ổ {0} (SkipEject)." -f $DriveLetter) "WARN" -Drive $DriveLetter
         return $result
@@ -1816,6 +1839,158 @@ function Invoke-PostCopyFlow {
     Write-Log ("BƯỚC EJECT hoàn tất cho ổ {0}." -f $DriveLetter) -Drive $DriveLetter
 
     return $result
+}
+
+function Get-SyncChangedRelPaths {
+    param(
+        [Parameter(Mandatory)]
+        [string]$DriveLetter
+    )
+
+    $sourceFull = (Resolve-Path -LiteralPath $SourceRoot).ProviderPath
+    $destRoot = Join-Path $DriveLetter (Split-Path $sourceFull -Leaf)
+    if (-not (Test-Path -LiteralPath $destRoot -PathType Container)) {
+        New-Item -LiteralPath $destRoot -ItemType Directory -Force -ErrorAction Stop | Out-Null
+    }
+    $destFull = (Resolve-Path -LiteralPath $destRoot).ProviderPath
+
+    $destMap = @{}
+    foreach ($file in @(Get-ChildItem -LiteralPath $destFull -Filter '*.mp3' -Recurse -File -Force -ErrorAction Stop)) {
+        $rel = $file.FullName.Substring($destFull.Length).TrimStart('\\')
+        $destMap[$rel.ToLowerInvariant()] = $file
+    }
+
+    $changed = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($file in @(Get-ChildItem -LiteralPath $sourceFull -Filter '*.mp3' -Recurse -File -Force -ErrorAction Stop)) {
+        $rel = $file.FullName.Substring($sourceFull.Length).TrimStart('\\')
+        $key = $rel.ToLowerInvariant()
+        $destFile = $null
+        if (-not $destMap.ContainsKey($key)) {
+            [void]$changed.Add($rel)
+            continue
+        }
+        $destFile = $destMap[$key]
+        if ($file.Length -ne $destFile.Length -or $file.LastWriteTimeUtc -gt $destFile.LastWriteTimeUtc) {
+            [void]$changed.Add($rel)
+        }
+    }
+    return @($changed | Sort-Object -Unique)
+}
+
+function New-SyncManifest {
+    param(
+        [Parameter(Mandatory)]
+        [string]$DriveLetter,
+        [Parameter(Mandatory)]
+        [string[]]$RelativePaths
+    )
+
+    $driveKey = Get-DriveKey $DriveLetter
+    $manifestPath = Join-Path $LogDir ("{0}_{1}_sync_manifest.txt" -f $script:LogBaseName, $driveKey)
+    $lines = @($RelativePaths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
+    if ($lines.Count -gt 0) {
+        Set-Content -LiteralPath $manifestPath -Value $lines -Encoding UTF8
+    }
+    else {
+        New-Item -LiteralPath $manifestPath -ItemType File -Force | Out-Null
+    }
+    return $manifestPath
+}
+
+function Invoke-SyncRobocopy {
+    param(
+        [Parameter(Mandatory)]
+        [string]$DriveLetter,
+        [Parameter(Mandatory)]
+        [string]$ManifestPath,
+        [int]$ThreadNo = 1
+    )
+
+    $sourceFull = (Resolve-Path -LiteralPath $SourceRoot).ProviderPath
+    $destPath = Join-Path $DriveLetter (Split-Path $sourceFull -Leaf)
+    $driveLog = Get-DriveLogFile -Drive $DriveLetter
+    if (-not $driveLog) { $driveLog = $script:LogFile }
+    $copyMode = if ($SyncMode -eq 'Mirror') { '/MIR' } else { '/E' }
+    $modeDescription = if ($SyncMode -eq 'Mirror') { 'Mirror, xóa file/thư mục dư ở đích' } else { 'UpdateOnly, giữ file dư ở đích' }
+    $params = @(
+        (Quote-PathArg $sourceFull),
+        (Quote-PathArg $destPath),
+        $copyMode,
+        '/Z',
+        '/COPY:DAT',
+        '/DCOPY:T',
+        '/R:2',
+        '/W:2',
+        '/NP',
+        ("/LOG+:" + (Quote-PathArg $driveLog)),
+        ("/MT:{0}" -f [Math]::Max(1, $ThreadNo))
+    )
+
+    Write-Log ("SYNC {0}: {1}; manifest={2}" -f $DriveLetter, $modeDescription, $ManifestPath) -Drive $DriveLetter
+    Write-Log ("CMD SYNC ({0}): robocopy {1}" -f $DriveLetter, ($params -join ' ')) -Drive $DriveLetter
+    try {
+        $process = Start-Process -FilePath 'robocopy.exe' -ArgumentList ($params -join ' ') -PassThru -WindowStyle Hidden
+        Register-ChildProcess -Process $process -Kind 'sync-robocopy' -Drive $DriveLetter
+        while (-not $process.HasExited) {
+            Start-Sleep -Milliseconds 500
+        }
+        $code = $process.ExitCode
+        Unregister-ChildProcess -Process $process
+        return [PSCustomObject]@{ Success = ($code -lt 8); Code = $code; Message = (Get-RobocopyExitMessage -Code $code) }
+    }
+    catch {
+        Write-Log ("SYNC lỗi khi chạy robocopy tới {0}: {1}" -f $DriveLetter, $_.Exception.Message) 'ERROR' -Drive $DriveLetter
+        return [PSCustomObject]@{ Success = $false; Code = 999; Message = $_.Exception.Message }
+    }
+}
+
+function Invoke-SyncWorkflow {
+    param([string[]]$Targets)
+
+    $errors = @{}
+    Write-Log '===== BẮT ĐẦU SYNC WORKFLOW: SYNC -> CHECK HASH SCOPED -> CHECK & SORT ====='
+    foreach ($drv in $Targets) {
+        try {
+            $changedPaths = @(Get-SyncChangedRelPaths -DriveLetter $drv)
+            $manifestPath = New-SyncManifest -DriveLetter $drv -RelativePaths $changedPaths
+            Write-Log ("SYNC {0}: phát hiện {1} file mp3 cần đồng bộ." -f $drv, $changedPaths.Count) -Drive $drv
+        }
+        catch {
+            Write-Log ("SYNC {0}: không tạo được manifest: {1}" -f $drv, $_.Exception.Message) 'ERROR' -Drive $drv
+            $errors[$drv] = "Không tạo được manifest: $($_.Exception.Message)"
+            continue
+        }
+
+        $syncResult = Invoke-SyncRobocopy -DriveLetter $drv -ManifestPath $manifestPath -ThreadNo 1
+        if (-not $syncResult.Success) {
+            Write-Log ("SYNC {0} lỗi (ExitCode={1}): {2}" -f $drv, $syncResult.Code, $syncResult.Message) 'ERROR' -Drive $drv
+            $errors[$drv] = $syncResult.Message
+            continue
+        }
+        Write-Log ("SYNC {0} hoàn tất (ExitCode={1}): {2}" -f $drv, $syncResult.Code, $syncResult.Message) -Drive $drv
+
+        $flowResult = Invoke-PostCopyFlow -DriveLetter $drv -OnlyFilesPath $manifestPath -ForceHash -ForceSort -SkipEjectAfterFlow
+        if (-not $flowResult.Success) {
+            $errors[$drv] = $flowResult.Message
+            Write-Log ("SYNC FLOW {0} lỗi tại {1}: {2}" -f $drv, $flowResult.Stage, $flowResult.Message) 'ERROR' -Drive $drv
+        }
+    }
+
+    if ($errors.Count -gt 0) {
+        Write-Log 'SYNC WORKFLOW kết thúc với lỗi.' 'ERROR'
+        foreach ($drv in $errors.Keys) {
+            Write-Log (" - {0}: {1}" -f $drv, $errors[$drv]) 'ERROR' -Drive $drv
+        }
+        return 1
+    }
+    Write-Log '===== SYNC WORKFLOW HOÀN TẤT: CHECK HASH SCOPED & CHECK/SORT OK ====='
+    return 0
+}
+
+if ($SyncWorkflow) {
+    $syncExitCode = Invoke-SyncWorkflow -Targets $ValidTargets
+    Stop-TrackedChildProcesses -Reason 'kết thúc SyncWorkflow'
+    exit $syncExitCode
 }
 
 Write-Log "BẮT ĐẦU BƯỚC COPY (robocopy)..."
