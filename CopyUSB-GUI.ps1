@@ -507,7 +507,19 @@ function Close-Gui {
 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = 'CopyUSB - Copy tới nhiều USB'
+$script:AppVersion = 'dev'
+$versionManifestPath = Join-Path $script:ScriptDir 'manifest.json'
+if (Test-Path -LiteralPath $versionManifestPath -PathType Leaf) {
+    try {
+        $versionManifest = Get-Content -LiteralPath $versionManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($versionManifest.Product -ne 'CopyUSB' -or $versionManifest.Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
+            throw 'Invalid CopyUSB version manifest.'
+        }
+        $script:AppVersion = 'v' + $versionManifest.Version
+    }
+    catch { Write-Warning "Cannot read application version: $($_.Exception.Message)" }
+}
+$form.Text = 'CopyUSB {0} - Copy tới nhiều USB' -f $script:AppVersion
 $form.StartPosition = 'CenterScreen'
 $form.Size = New-Object System.Drawing.Size(1120, 780)
 $form.MinimumSize = New-Object System.Drawing.Size(900, 650)
