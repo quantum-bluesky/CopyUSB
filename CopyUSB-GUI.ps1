@@ -528,7 +528,7 @@ $mainLayout = New-Object System.Windows.Forms.TableLayoutPanel
 $mainLayout.Dock = 'Fill'
 $mainLayout.ColumnCount = 1
 $mainLayout.RowCount = 3
-[void]$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Absolute', 360)))
+[void]$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Absolute', 280)))
 [void]$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Percent', 100)))
 [void]$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('AutoSize')))
 [void]$form.Controls.Add($mainLayout)
@@ -635,12 +635,12 @@ Add-FieldRow 0 'SourceRoot' $sourceText 0 $browseSourceButton
 $settings.SetColumnSpan($sourceText, 2)
 Add-FieldRow 1 'DestDrives (USB)' $destText 0 $driveButtons
 [void]$settings.Controls.Add($ejectButton, 3, 1)
-Add-FieldRow 2 'CheckScriptPath' $checkScriptText 0
-Add-FieldRow 2 'SortScriptPath' $sortScriptText 2
-Add-FieldRow 3 'DiskCheckScriptPath' $diskCheckScriptText 0
-Add-FieldRow 3 'EjectScriptPath' $ejectScriptText 2
-Add-FieldRow 4 'RemountScriptPath' $remountScriptText 0
-Add-FieldRow 4 'RemountCachePath' $remountCacheText 2
+# Add-FieldRow 2 'CheckScriptPath' $checkScriptText 0
+# Add-FieldRow 2 'SortScriptPath' $sortScriptText 2
+# Add-FieldRow 3 'DiskCheckScriptPath' $diskCheckScriptText 0
+# Add-FieldRow 3 'EjectScriptPath' $ejectScriptText 2
+# Add-FieldRow 4 'RemountScriptPath' $remountScriptText 0
+# Add-FieldRow 4 'RemountCachePath' $remountCacheText 2
 Add-FieldRow 5 'LogDir' $logDirText 0 $browseLogButton
 Add-FieldRow 6 'HashLastN (0=all)' $hashLastNText 2
 Add-FieldRow 6 'HashAlgorithm' $hashAlgorithmCombo 0
