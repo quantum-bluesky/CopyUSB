@@ -9,7 +9,7 @@ Cài vào `%LOCALAPPDATA%\CopyUSB`, không cần quyền admin hay Internet.
 Yêu cầu Windows 10/11 với Windows PowerShell 5.1, Windows Forms và Storage module.
 Chính sách công ty có thể chặn script; installer không thay đổi chính sách hệ thống.
 
-## Cập nhật
+## Cập nhật và gỡ cài đặt
 
 Nhận ZIP mới, giải nén, đóng ứng dụng rồi chạy `Install.cmd` như lần đầu, bằng
 cùng tài khoản Windows. Đây là gói đầy đủ, không cần cài các bản trung gian.
@@ -50,9 +50,13 @@ phù hợp máy người dùng. Builder từ chối đóng gói binary đó. C�
 kiểm thử trên máy sạch trước khi phân phối gói YAFS; nếu dùng VC runtime động,
 máy đích cần Visual C++ Redistributable tương ứng. Không kèm runtime Debug.
 
-Gỡ cài: dùng Register-CopyUSBContextMenu.ps1 trong phiên bản đang cài với
-`-Action Uninstall`, xóa hai shortcut CopyUSB, rồi xóa thư mục cài đặt sau khi
-đã lưu log cần giữ.
+Gỡ cài: đóng CopyUSB rồi bấm đúp `Uninstall.cmd` trong thư mục package đã giải nén
+hoặc trong `%LOCALAPPDATA%\CopyUSB`. Script sẽ gỡ context menu, xóa shortcut và xóa
+thư mục cài đặt của user hiện tại. Nếu muốn giữ log, chạy:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Uninstall-CopyUSB.ps1 -KeepLogs
+```
 
 Bản đã cài tại đường dẫn cũ `%LOCALAPPDATA%\Programs\CopyUSB` vẫn được cập nhật tại đó nếu đọc được `current.txt`. Nếu không tạo được shortcut/menu, installer báo cảnh báo và in lệnh mở ứng dụng thủ công; ứng dụng vẫn được cài. Khi lỗi cài đặt, thông báo ghi rõ bước và đường dẫn.
 

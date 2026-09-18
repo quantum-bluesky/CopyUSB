@@ -31,7 +31,7 @@ try {
         New-Item -ItemType Directory -Path (Join-Path $payload 'tools') | Out-Null
         Copy-Item -LiteralPath $YafsDirectory -Destination (Join-Path $payload 'tools\yafs') -Recurse
     }
-    foreach ($file in @('Install-CopyUSB.ps1', 'Launch-CopyUSB.ps1', 'Install.cmd', 'HUONG_DAN_CAI_DAT.md')) {
+    foreach ($file in @('Install-CopyUSB.ps1', 'Launch-CopyUSB.ps1', 'Uninstall-CopyUSB.ps1', 'Install.cmd', 'Uninstall.cmd', 'HUONG_DAN_CAI_DAT.md')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot "distribution\$file") -Destination $stage
     }
     $entries = @(Get-ChildItem -LiteralPath $payload -Recurse -File | ForEach-Object {

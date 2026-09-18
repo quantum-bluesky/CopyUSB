@@ -57,6 +57,14 @@ try {
     $launcher = Join-Path $root 'Launch-CopyUSB.ps1'
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Launch-CopyUSB.ps1') -Destination $launcher -Force
     Unblock-File -LiteralPath $launcher
+    foreach ($uninstallFile in @('Uninstall-CopyUSB.ps1', 'Uninstall.cmd')) {
+        $uninstallSource = Join-Path $PSScriptRoot $uninstallFile
+        if (Test-Path -LiteralPath $uninstallSource) {
+            $uninstallTarget = Join-Path $root $uninstallFile
+            Copy-Item -LiteralPath $uninstallSource -Destination $uninstallTarget -Force
+            Unblock-File -LiteralPath $uninstallTarget
+        }
+    }
     $shell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $step = "Activate installed version: $root"
     $current = Join-Path $root 'current.txt'
