@@ -521,14 +521,14 @@ if (Test-Path -LiteralPath $versionManifestPath -PathType Leaf) {
 }
 $form.Text = 'CopyUSB {0} - Copy tới nhiều USB' -f $script:AppVersion
 $form.StartPosition = 'CenterScreen'
-$form.Size = New-Object System.Drawing.Size(1120, 780)
+$form.Size = New-Object System.Drawing.Size(1000, 780)
 $form.MinimumSize = New-Object System.Drawing.Size(900, 650)
 $form.Font = New-Object System.Drawing.Font('Segoe UI', 9)
 $mainLayout = New-Object System.Windows.Forms.TableLayoutPanel
 $mainLayout.Dock = 'Fill'
 $mainLayout.ColumnCount = 1
 $mainLayout.RowCount = 3
-[void]$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Absolute', 280)))
+[void]$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Absolute', 290)))
 [void]$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Percent', 100)))
 [void]$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('AutoSize')))
 [void]$form.Controls.Add($mainLayout)
@@ -541,7 +541,7 @@ $settings = New-Object System.Windows.Forms.TableLayoutPanel
 $settings.Dock = 'Top'
 $settings.AutoSize = $true
 $settings.AutoSizeMode = 'GrowAndShrink'
-$settings.MinimumSize = New-Object System.Drawing.Size(980, 0)
+$settings.MinimumSize = New-Object System.Drawing.Size(900, 0)
 $settings.ColumnCount = 4
 $settings.RowCount = 9
 [void]$settings.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 145)))
