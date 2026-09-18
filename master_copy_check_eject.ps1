@@ -1713,6 +1713,8 @@ function Invoke-PostCopyFlow {
         [string]$OnlyFilesPath = '',
         [switch]$ForceHash,
         [switch]$ForceSort,
+        [switch]$ForceAllHash,
+        [switch]$TailCheckBySyncSize,
         [switch]$SkipEjectAfterFlow
     )
 
@@ -1737,6 +1739,7 @@ function Invoke-PostCopyFlow {
         Write-Log ("BẮT ĐẦU BƯỚC CHECK cho ổ {0}..." -f $DriveLetter) -Drive $DriveLetter
         $driveLog = Get-DriveLogFile -Drive $DriveLetter
         $checkScriptFull = [System.IO.Path]::GetFullPath($CheckScriptPath)
+        $effectiveHashLastN = if ($ForceAllHash -or $TailCheckBySyncSize) { 0 } else { $HashLastN }
         $checkArgs = @(
             "-NoProfile", "-ExecutionPolicy", "Bypass",
             "-File", $checkScriptFull,
@@ -1745,13 +1748,20 @@ function Invoke-PostCopyFlow {
             "-NoConfirm",
             "-NoPause",
             "-LogFile", $driveLog,
-            "-HashLastN", $HashLastN,
+            "-HashLastN", $effectiveHashLastN,
             "-HashAlgorithm", $HashAlgorithm
         )
         if ($ForceHash -or $EnableHash) { $checkArgs += "-Hash" }
         if (-not [string]::IsNullOrWhiteSpace($OnlyFilesPath)) {
             $checkArgs += @("-OnlyFilesPath", $OnlyFilesPath)
             Write-Log ("CHECK scoped theo manifest: {0}" -f $OnlyFilesPath) -Drive $DriveLetter
+        }
+        if ($TailCheckBySyncSize) {
+            $checkArgs += '-TailCheckBySyncSize'
+            Write-Log "CHECK bổ sung tail safety theo tổng dung lượng nhóm file sync; ép HashLastN=0." -Drive $DriveLetter
+        }
+        elseif ($ForceAllHash) {
+            Write-Log "CHECK scoped: ép HashLastN=0 để hash toàn bộ manifest sync + tail pre-sync." -Drive $DriveLetter
         }
         Write-Log ("CMD CHECK ({0}): {1} {2}" -f $DriveLetter, $script:ShellExe, ($checkArgs -join " ")) -Drive $DriveLetter
         $null = & $script:ShellExe @checkArgs
@@ -1850,7 +1860,7 @@ function Get-SyncChangedRelPaths {
     $sourceFull = (Resolve-Path -LiteralPath $SourceRoot).ProviderPath
     $destRoot = Join-Path $DriveLetter (Split-Path $sourceFull -Leaf)
     if (-not (Test-Path -LiteralPath $destRoot -PathType Container)) {
-        New-Item -LiteralPath $destRoot -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        New-Item -Path $destRoot -ItemType Directory -Force -ErrorAction Stop | Out-Null
     }
     $destFull = (Resolve-Path -LiteralPath $destRoot).ProviderPath
 
@@ -1877,12 +1887,69 @@ function Get-SyncChangedRelPaths {
     return @($changed | Sort-Object -Unique)
 }
 
+function Get-SyncTailPlan {
+    param(
+        [Parameter(Mandatory)]
+        [string]$DriveLetter,
+        [string[]]$SyncPaths = @()
+    )
+
+    $sourceFull = (Resolve-Path -LiteralPath $SourceRoot).ProviderPath
+    $destRoot = Join-Path $DriveLetter (Split-Path $sourceFull -Leaf)
+    if (-not (Test-Path -LiteralPath $destRoot -PathType Container)) {
+        return [PSCustomObject]@{ TailPaths = @(); SyncBytes = 0L; TailBytes = 0L; MirrorDeleteCount = 0 }
+    }
+    $destFull = (Resolve-Path -LiteralPath $destRoot).ProviderPath
+
+    $syncKeys = @{}
+    foreach ($rel in @($SyncPaths)) {
+        if (-not [string]::IsNullOrWhiteSpace($rel)) { $syncKeys[$rel.ToLowerInvariant()] = $true }
+    }
+    $sourceFiles = @(Get-ChildItem -LiteralPath $sourceFull -Filter '*.mp3' -Recurse -File -Force -ErrorAction Stop)
+    $sourceKeys = @{}
+    $syncBytes = 0L
+    foreach ($file in $sourceFiles) {
+        $rel = $file.FullName.Substring($sourceFull.Length).TrimStart('\\')
+        $key = $rel.ToLowerInvariant()
+        $sourceKeys[$key] = $true
+        if ($syncKeys.ContainsKey($key)) { $syncBytes += [int64]$file.Length }
+    }
+
+    $tailPaths = New-Object 'System.Collections.Generic.List[string]'
+    $tailBytes = 0L
+    $mirrorDeleteCount = 0
+    if ($syncBytes -gt 0) {
+        $destFiles = @(Get-ChildItem -LiteralPath $destFull -Filter '*.mp3' -Recurse -File -Force -ErrorAction Stop)
+        foreach ($file in @($destFiles | Sort-Object FullName -Descending)) {
+            $rel = $file.FullName.Substring($destFull.Length).TrimStart('\\')
+            $key = $rel.ToLowerInvariant()
+            if (-not $sourceKeys.ContainsKey($key)) {
+                # Mirror sẽ purge file này; tuyệt đối không đưa nó vào tail safety manifest.
+                $mirrorDeleteCount++
+                continue
+            }
+            if ($syncKeys.ContainsKey($key)) { continue }
+            [void]$tailPaths.Add($rel)
+            $tailBytes += [int64]$file.Length
+            if ($tailBytes -ge $syncBytes) { break }
+        }
+    }
+
+    return [PSCustomObject]@{
+        TailPaths = @($tailPaths | Sort-Object -Unique)
+        SyncBytes = $syncBytes
+        TailBytes = $tailBytes
+        MirrorDeleteCount = $mirrorDeleteCount
+    }
+}
+
 function New-SyncManifest {
     param(
         [Parameter(Mandatory)]
         [string]$DriveLetter,
         [Parameter(Mandatory)]
-        [string[]]$RelativePaths
+        [AllowEmptyCollection()]
+        [string[]]$RelativePaths = @()
     )
 
     $driveKey = Get-DriveKey $DriveLetter
@@ -1892,7 +1959,7 @@ function New-SyncManifest {
         Set-Content -LiteralPath $manifestPath -Value $lines -Encoding UTF8
     }
     else {
-        New-Item -LiteralPath $manifestPath -ItemType File -Force | Out-Null
+        New-Item -Path $manifestPath -ItemType File -Force | Out-Null
     }
     return $manifestPath
 }
@@ -1952,8 +2019,11 @@ function Invoke-SyncWorkflow {
     foreach ($drv in $Targets) {
         try {
             $changedPaths = @(Get-SyncChangedRelPaths -DriveLetter $drv)
-            $manifestPath = New-SyncManifest -DriveLetter $drv -RelativePaths $changedPaths
-            Write-Log ("SYNC {0}: phát hiện {1} file mp3 cần đồng bộ." -f $drv, $changedPaths.Count) -Drive $drv
+            $tailPlan = Get-SyncTailPlan -DriveLetter $drv -SyncPaths $changedPaths
+            $manifestPaths = @((@($changedPaths) + @($tailPlan.TailPaths)) | Sort-Object -Unique)
+            $manifestPath = New-SyncManifest -DriveLetter $drv -RelativePaths $manifestPaths
+            Write-Log ("SYNC {0}: trước sync có {1} file thay đổi ({2:N0} bytes), lọc bỏ {3} file sẽ bị Mirror xóa, chọn thêm {4} file cuối danh sách đích ({5:N0} bytes); manifest tổng {6} file." -f `
+                $drv, $changedPaths.Count, $tailPlan.SyncBytes, $tailPlan.MirrorDeleteCount, @($tailPlan.TailPaths).Count, $tailPlan.TailBytes, $manifestPaths.Count) -Drive $drv
         }
         catch {
             Write-Log ("SYNC {0}: không tạo được manifest: {1}" -f $drv, $_.Exception.Message) 'ERROR' -Drive $drv
@@ -1969,7 +2039,7 @@ function Invoke-SyncWorkflow {
         }
         Write-Log ("SYNC {0} hoàn tất (ExitCode={1}): {2}" -f $drv, $syncResult.Code, $syncResult.Message) -Drive $drv
 
-        $flowResult = Invoke-PostCopyFlow -DriveLetter $drv -OnlyFilesPath $manifestPath -ForceHash -ForceSort -SkipEjectAfterFlow
+        $flowResult = Invoke-PostCopyFlow -DriveLetter $drv -OnlyFilesPath $manifestPath -ForceHash -ForceSort -ForceAllHash -SkipEjectAfterFlow
         if (-not $flowResult.Success) {
             $errors[$drv] = $flowResult.Message
             Write-Log ("SYNC FLOW {0} lỗi tại {1}: {2}" -f $drv, $flowResult.Stage, $flowResult.Message) 'ERROR' -Drive $drv
@@ -1990,6 +2060,11 @@ function Invoke-SyncWorkflow {
 if ($SyncWorkflow) {
     $syncExitCode = Invoke-SyncWorkflow -Targets $ValidTargets
     Stop-TrackedChildProcesses -Reason 'kết thúc SyncWorkflow'
+    if (-not $NoPause) {
+        Write-Host ""
+        Write-Host "SyncWorkflow đã kết thúc. Console sẽ giữ lại để xem log." -ForegroundColor Cyan
+        Read-Host "Nhấn Enter để thoát" | Out-Null
+    }
     exit $syncExitCode
 }
 

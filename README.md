@@ -27,5 +27,10 @@ Checkbox `Force format USB/thẻ nhớ <64GB` bật `-ForceFormatMemoryCard`; th
 removable dưới 64GB sẽ được format trước khi copy (trên 32GB dùng exFAT).
 Khi chọn `SyncWorkflow`, `SyncMode=Mirror` là mặc định và dùng `/MIR` để xóa
 file/thư mục dư ở đích; có thể đổi sang `UpdateOnly` để giữ lại dữ liệu dư.
+Trước khi sync, flow chụp các file ở cuối danh sách đích, loại các file sẽ bị
+`Mirror` xóa, rồi đưa phần còn lại vào manifest. Sau sync bước hash kiểm tra cả
+hai nhóm, nhằm phát hiện hiện tượng thẻ nhớ ghi đè vòng lên dữ liệu cũ.
 Khi dừng bằng `Ctrl+C`, đóng console PowerShell hoặc đóng GUI, process chạy và
 các process con sẽ được dọn theo cây PID.
+Khi SyncWorkflow kết thúc, console riêng sẽ giữ lại và chờ Enter để xem log;
+chạy với `-NoPause` nếu muốn tự động thoát.

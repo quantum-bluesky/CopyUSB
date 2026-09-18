@@ -30,7 +30,10 @@
     [string]$LogFile,
 
     # Chỉ kiểm tra các đường dẫn tương đối nằm trong manifest đồng bộ
-    [string]$OnlyFilesPath
+    [string]$OnlyFilesPath,
+
+    # Khi dùng manifest sync: bổ sung nhóm file cuối danh sách đích có tổng size >= nhóm sync
+    [switch]$TailCheckBySyncSize
 )
 
 Set-StrictMode -Version Latest
@@ -78,6 +81,7 @@ function Show-Help {
     Write-Host "  -NoPause                 : Không chờ Enter cuối script."
     Write-Host "  -LogFile     <path>      : Ghi log vào file chỉ định."
     Write-Host "  -OnlyFilesPath <path>    : Chỉ check các file tương đối trong manifest."
+    Write-Host "  -TailCheckBySyncSize     : Bổ sung file cuối danh sách đích theo tổng size nhóm sync."
     Write-Host "  -h / -Help               : Hiển thị hướng dẫn này."
     Write-Host ""
     Write-Host "Ví dụ:" -ForegroundColor Yellow
@@ -159,6 +163,7 @@ function Get-Mp3List {
 # -------- SOURCE --------
 Write-Log "Đang quét SOURCE: $SourceRoot"
 $srcList  = Get-Mp3List -Root $SourceRoot
+$fullSrcList = @($srcList)
 $srcCount = $srcList.Count
 $srcSize  = ($srcList | Measure-Object Length -Sum).Sum
 
@@ -168,7 +173,7 @@ $jobs = @()
 $summaries = @()
 
 foreach ($drv in $DestDrives) {
-    $jobs += Start-Job -ArgumentList $drv, $SourceRoot, $srcList, $Hash, $HashAlgorithm, $HashLastN, $srcCount, $srcSize, $LogFile, $OnlyFilesPath -ScriptBlock {
+    $jobs += Start-Job -ArgumentList $drv, $SourceRoot, $srcList, $Hash, $HashAlgorithm, $HashLastN, $srcCount, $srcSize, $LogFile, $OnlyFilesPath, $TailCheckBySyncSize -ScriptBlock {
         param(
             $drv,
             $SourceRoot,
@@ -179,10 +184,12 @@ foreach ($drv in $DestDrives) {
             $srcCount,
             $srcSize,
             $LogFile,
-            $OnlyFilesPath
+            $OnlyFilesPath,
+            $TailCheckBySyncSize
         )
 
         Set-StrictMode -Version Latest
+        $fullSrcList = @($srcList)
 
         function Write-LogLocal {
             param(
@@ -511,6 +518,8 @@ namespace CopyUsb {
             return
         }
 
+        $fullDstList = @($dstList)
+
         $onlyFilesActive = -not [string]::IsNullOrWhiteSpace($OnlyFilesPath)
         $onlyFiles = @()
         if ($onlyFilesActive) {
@@ -529,15 +538,41 @@ namespace CopyUsb {
                 } | Sort-Object -Unique)
             $allowed = @{}
             foreach ($rel in $onlyFiles) { $allowed[$rel] = $true }
-            $srcList = @($srcList | Where-Object { $allowed.ContainsKey(([string]$_.RelPath).ToLowerInvariant()) })
-            $dstList = @($dstList | Where-Object { $allowed.ContainsKey(([string]$_.RelPath).ToLowerInvariant()) })
+
+            if ($TailCheckBySyncSize) {
+                $syncSourceList = @($fullSrcList | Where-Object { $allowed.ContainsKey(([string]$_.RelPath).ToLowerInvariant()) })
+                $syncTotalBytes = [int64](($syncSourceList | Measure-Object Length -Sum).Sum)
+                $syncKeys = @{}
+                foreach ($rel in $onlyFiles) { $syncKeys[$rel] = $true }
+                $sourceKeys = @{}
+                foreach ($sourceFile in $fullSrcList) { $sourceKeys[$sourceFile.RelPath.ToLowerInvariant()] = $true }
+
+                $tailFiles = New-Object 'System.Collections.Generic.List[object]'
+                $tailBytes = 0L
+                if ($syncTotalBytes -gt 0) {
+                    foreach ($candidate in @($fullDstList | Sort-Object RelPath -Descending)) {
+                        $candidateKey = ([string]$candidate.RelPath).ToLowerInvariant()
+                        if ($syncKeys.ContainsKey($candidateKey)) { continue }
+                        if (-not $sourceKeys.ContainsKey($candidateKey)) { continue }
+                        [void]$tailFiles.Add($candidate)
+                        $tailBytes += [int64]$candidate.Length
+                        $allowed[$candidateKey] = $true
+                        if ($tailBytes -ge $syncTotalBytes) { break }
+                    }
+                }
+
+                Write-LogLocal ("[$drv] Tail safety check: sync={0:N0} bytes; bổ sung {1} file cuối danh sách đích={2:N0} bytes." -f $syncTotalBytes, $tailFiles.Count, $tailBytes)
+            }
+
+            $srcList = @($fullSrcList | Where-Object { $allowed.ContainsKey(([string]$_.RelPath).ToLowerInvariant()) })
+            $dstList = @($fullDstList | Where-Object { $allowed.ContainsKey(([string]$_.RelPath).ToLowerInvariant()) })
             $srcMap = @{}
             foreach ($f in $srcList) { $srcMap[$f.RelPath.ToLowerInvariant()] = $f }
             $srcCount = $srcList.Count
             $srcSize = ($srcList | Measure-Object Length -Sum).Sum
-            Write-LogLocal ("[$drv] Scoped check: chỉ kiểm tra {0} file trong manifest {1}." -f $onlyFiles.Count, $OnlyFilesPath)
+            Write-LogLocal ("[$drv] Scoped check: manifest {0} file; sau tail safety sẽ check {1} file." -f $onlyFiles.Count, $allowed.Count)
 
-            if ($onlyFiles.Count -eq 0) {
+            if ($allowed.Count -eq 0) {
                 Write-LogLocal "[$drv] Không có file đồng bộ cần check hash; xem như OK." "WARN"
                 $summary.Status = "OK"
                 Write-Output $summary

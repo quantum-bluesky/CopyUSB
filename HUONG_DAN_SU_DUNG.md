@@ -81,7 +81,11 @@ GUI có các chế độ chạy độc lập:
 - `SyncWorkflow`: đồng bộ incremental từ source sang đích, check hash chỉ các
   file `.mp3` có trong manifest vừa đồng bộ, sau đó chạy `CheckAndSort`. Mặc
   định `SyncMode=Mirror` dùng robocopy `/MIR` để xóa file/thư mục dư ở đích;
-  chọn `UpdateOnly` nếu muốn giữ file dư.
+  chọn `UpdateOnly` nếu muốn giữ file dư. Trước khi sync, flow chọn các file
+  cuối ở đích có tổng dung lượng tối thiểu bằng nhóm sync, đồng thời loại các
+  file sẽ bị `Mirror` xóa; sau đó hash cả hai nhóm để phát hiện trường hợp thẻ
+  nhớ bị ghi đè vòng.
+  Khi kết thúc, console chờ Enter để xem log; dùng `-NoPause` nếu muốn tự động thoát.
 - `CheckCopyHash`: chỉ chạy `check_copy_hash.ps1`.
 - `CheckUsbDisk`: chỉ chạy `Check-UsbDisk.ps1`, có thể bật `Fix lỗi disk`.
 - `Mp3FatSort`: chỉ chạy `Mp3FatSort.ps1`, chọn được mode, scope, filter và

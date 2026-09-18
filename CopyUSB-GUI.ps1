@@ -354,7 +354,9 @@ function New-MasterCommand {
     if ($forceMultiThreadCheck.Checked) { [void]$parts.Add('-ForceMultiThreadUsb') }
     if ($forceFormatMemoryCardCheck.Checked) { [void]$parts.Add('-ForceFormatMemoryCard') }
     if ($mode -eq 'SyncWorkflow') { [void]$parts.Add('-SyncWorkflow') }
-    [void]$parts.Add('-NoPause')
+    if ($mode -ne 'SyncWorkflow' -or -not $showConsoleCheck.Checked) {
+        [void]$parts.Add('-NoPause')
+    }
     return ($parts -join ' ')
 }
 
