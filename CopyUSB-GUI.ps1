@@ -22,7 +22,8 @@
     [string]$LogDir = '',
     [bool]$AutoYes = $false,
     [bool]$SkipEject = $false,
-    [bool]$ForceMultiThreadUsb = $false
+    [bool]$ForceMultiThreadUsb = $false,
+    [bool]$ForceFormatMemoryCard = $false
 )
 
 Set-StrictMode -Version Latest
@@ -47,6 +48,7 @@ $script:LogOffset = 0L
 $script:LastLogPath = $null
 $script:GuiLogPath = $null
 $script:RunStartedAt = $null
+$script:GuiClosing = $false
 
 function Resolve-GuiDefault {
     param([AllowEmptyString()][string]$Value, [Parameter(Mandatory)][string]$Fallback)
@@ -126,6 +128,67 @@ function Append-ConsoleText {
     $consoleText.ScrollToCaret()
 }
 
+function Get-GuiDescendantProcessIds {
+    param([int]$RootProcessId)
+
+    $result = New-Object 'System.Collections.Generic.List[int]'
+    $pending = New-Object 'System.Collections.Generic.List[int]'
+    if ($RootProcessId -gt 0) { [void]$pending.Add($RootProcessId) }
+    try {
+        $all = @(Get-CimInstance Win32_Process -ErrorAction Stop |
+            Select-Object ProcessId, ParentProcessId)
+    }
+    catch {
+        return @()
+    }
+
+    while ($pending.Count -gt 0) {
+        $parentId = $pending[0]
+        $pending.RemoveAt(0)
+        foreach ($item in @($all | Where-Object { [int]$_.ParentProcessId -eq $parentId })) {
+            $childId = [int]$item.ProcessId
+            if ($childId -le 0 -or $result.Contains($childId)) { continue }
+            [void]$result.Add($childId)
+            [void]$pending.Add($childId)
+        }
+    }
+    return @($result)
+}
+
+function Stop-GuiProcessTree {
+    param([int]$RootProcessId)
+
+    if ($RootProcessId -le 0) { return }
+    $descendants = @(Get-GuiDescendantProcessIds -RootProcessId $RootProcessId)
+    $ids = @($descendants | Sort-Object -Descending -Unique) + $RootProcessId
+    try {
+        # /T giúp dọn cả cây process ngay cả khi CIM bị giới hạn quyền truy cập.
+        & taskkill.exe /PID $RootProcessId /T /F 2>$null | Out-Null
+    }
+    catch { }
+    foreach ($processId in $ids) {
+        try {
+            Stop-Process -Id ([int]$processId) -Force -ErrorAction Stop
+        }
+        catch {
+            # Process có thể đã tự thoát; tiếp tục đóng các process còn lại.
+        }
+    }
+}
+
+Register-EngineEvent -SourceIdentifier PowerShell.Exiting -SupportEvent -Action {
+    if ($null -ne $script:RunProcess) {
+        try { Stop-GuiProcessTree -RootProcessId ([int]$script:RunProcess.Id) } catch { }
+    }
+} | Out-Null
+
+trap [System.Management.Automation.PipelineStoppedException] {
+    if ($null -ne $script:RunProcess) {
+        try { Stop-GuiProcessTree -RootProcessId ([int]$script:RunProcess.Id) } catch { }
+    }
+    break
+}
+
 function Read-RunLog {
     $logDir = Get-LogDirectory $logDirText.Text.Trim()
     if (-not (Test-Path -LiteralPath $logDir)) { return }
@@ -178,7 +241,9 @@ function Set-RunState {
 function Complete-RunIfNeeded {
     if ($null -eq $script:RunProcess -or -not $script:RunProcess.HasExited) { return }
     Read-RunLog
+    $runPid = [int]$script:RunProcess.Id
     $exitCode = $script:RunProcess.ExitCode
+    Stop-GuiProcessTree -RootProcessId $runPid
     $script:RunProcess.Dispose()
     $script:RunProcess = $null
     Set-RunState $false
@@ -282,6 +347,7 @@ function New-MasterCommand {
     if ($autoYesCheck.Checked) { [void]$parts.Add('-AutoYes') }
     if ($skipEjectCheck.Checked) { [void]$parts.Add('-SkipEject') }
     if ($forceMultiThreadCheck.Checked) { [void]$parts.Add('-ForceMultiThreadUsb') }
+    if ($forceFormatMemoryCardCheck.Checked) { [void]$parts.Add('-ForceFormatMemoryCard') }
     [void]$parts.Add('-NoPause')
     return ($parts -join ' ')
 }
@@ -346,15 +412,23 @@ function Stop-MasterRun {
     if ($null -eq $script:RunProcess) { return }
     $answer = [System.Windows.Forms.MessageBox]::Show('Dừng tiến trình đang chạy? Có thể còn file chưa hoàn tất.', 'CopyUSB', 'YesNo', 'Warning')
     if ($answer -ne 'Yes') { return }
-    try { Stop-Process -Id $script:RunProcess.Id -Force -ErrorAction Stop; Append-ConsoleText '[GUI] Đã dừng tiến trình.' }
+    try {
+        $runPid = [int]$script:RunProcess.Id
+        Stop-GuiProcessTree -RootProcessId $runPid
+        Append-ConsoleText '[GUI] Đã dừng tiến trình và các process con.'
+    }
     catch { Append-ConsoleText "[GUI] Không thể dừng tiến trình: $($_.Exception.Message)" }
 }
 
 function Close-Gui {
     if ($null -ne $script:RunProcess -and -not $script:RunProcess.HasExited) {
-        [System.Windows.Forms.MessageBox]::Show('Hãy dừng hoặc chờ tiến trình hoàn tất trước khi thoát.', 'CopyUSB', 'OK', 'Warning') | Out-Null
-        return
+        $answer = [System.Windows.Forms.MessageBox]::Show('Tiến trình đang chạy. Dừng toàn bộ process con rồi thoát?', 'CopyUSB', 'YesNo', 'Warning')
+        if ($answer -ne 'Yes') { return }
+        Stop-GuiProcessTree -RootProcessId ([int]$script:RunProcess.Id)
+        Append-ConsoleText '[GUI] Đã đóng process chạy và các process con trước khi thoát.'
     }
+    $script:GuiClosing = $true
+    if ($null -ne $timer) { $timer.Stop() }
     $form.Close()
 }
 
@@ -480,6 +554,7 @@ $fixDiskCheck = New-CheckBox 'Fix lỗi disk' $FixDiskErrors
 $autoYesCheck = New-CheckBox 'AutoYes (bỏ prompt xác nhận)' $AutoYes
 $skipEjectCheck = New-CheckBox 'SkipEject' $SkipEject
 $forceMultiThreadCheck = New-CheckBox 'ForceMultiThreadUsb' $ForceMultiThreadUsb
+$forceFormatMemoryCardCheck = New-CheckBox 'Force format USB/thẻ nhớ <64GB' $ForceFormatMemoryCard
 $showConsoleCheck = New-CheckBox 'Hiện console PowerShell riêng' $true
 $sortForceCheck = New-CheckBox 'Sort -Force' $true
 $sortNoParallelCheck = New-CheckBox 'Sort tuần tự' $false
@@ -503,6 +578,7 @@ $checks.Dock = 'Fill'; $checks.AutoSize = $true; $checks.WrapContents = $true
 [void]$checks.Controls.Add($autoYesCheck)
 [void]$checks.Controls.Add($skipEjectCheck)
 [void]$checks.Controls.Add($forceMultiThreadCheck)
+[void]$checks.Controls.Add($forceFormatMemoryCardCheck)
 [void]$checks.Controls.Add($showConsoleCheck)
 $hashLastNText.Enabled = $checkCopyToolCheck.Checked
 $hashAlgorithmCombo.Enabled = $checkCopyToolCheck.Checked
@@ -527,7 +603,7 @@ $sortToolCheck.Add_CheckedChanged({
 $skipEjectCheck.Checked = $true
 [void]$settings.Controls.Add($checks, 0, 7); $settings.SetColumnSpan($checks, 4)
 $warningLabel = New-Object System.Windows.Forms.Label
-$warningLabel.Text = 'Lưu ý: cleanup/format/eject có thể thay đổi dữ liệu trên USB. Hãy kiểm tra cấu hình trước khi chạy. ForceMultiThreadUsb có thể gây over speed đối với thẻ usb cũ, dễ gây lỗi copy giữa chừng, cần test!'
+$warningLabel.Text = 'Lưu ý: cleanup/format/eject có thể thay đổi dữ liệu trên USB. Force format sẽ xóa toàn bộ dữ liệu trên USB/thẻ nhớ dưới 64GB. Hãy kiểm tra cấu hình trước khi chạy. ForceMultiThreadUsb có thể gây lỗi copy với thẻ USB cũ.'
 $warningLabel.ForeColor = [System.Drawing.Color]::DarkGoldenrod; $warningLabel.AutoSize = $true; $warningLabel.Dock = 'Fill'
 [void]$settings.Controls.Add($warningLabel, 0, 8); $settings.SetColumnSpan($warningLabel, 4)
 
@@ -558,7 +634,12 @@ $form.Add_Resize({
         $settings.Width = [Math]::Max(980, $settingsPanel.ClientSize.Width - 20)
     }
 })
-$form.Add_FormClosing({ if ($null -ne $script:RunProcess -and -not $script:RunProcess.HasExited) { $_.Cancel = $true; Close-Gui } })
+$form.Add_FormClosing({
+    if (-not $script:GuiClosing -and $null -ne $script:RunProcess -and -not $script:RunProcess.HasExited) {
+        $_.Cancel = $true
+        Close-Gui
+    }
+})
 Set-RunState $false
 $settings.Width = [Math]::Max(980, $settingsPanel.ClientSize.Width - 20)
 $form.Add_Shown({ $sourceText.Focus() })

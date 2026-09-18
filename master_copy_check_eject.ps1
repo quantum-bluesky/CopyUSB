@@ -53,6 +53,10 @@
     # Buoc copy chi su dung 1 thread de tránh lỗi cho USB
     [switch]$ForceMultiThreadUsb,
 
+    # Ép format các USB/thiết bị lưu trữ dạng thẻ nhớ có dung lượng dưới 64GB
+    [Alias('ForceFormatUsbUnder64GB')]
+    [switch]$ForceFormatMemoryCard,
+
     # Không dừng ở màn hình console khi GUI điều khiển tiến trình
     [switch]$NoPause
 )
@@ -65,6 +69,8 @@ $script:EarlyCopyErrors = @{}
 $script:CopySpeedStates = @{}
 $script:CopyAbortReasons = @{}
 $script:StartCopyErrors = @{}
+$script:ChildProcesses = @{}
+$script:ShutdownStarted = $false
 
 $PreparedTargets = @()
 $MirrorTargets = @()
@@ -77,6 +83,109 @@ $script:CopyNoProgressDeltaBytes = 65536
 $script:CopyProgressPollSec = 15
 $script:MaxStallChecks = 3
 $script:MaxWarnChecks = 5
+$script:MemoryCardThresholdBytes = 64GB
+
+function Register-ChildProcess {
+    param(
+        [Parameter(Mandatory)]
+        [System.Diagnostics.Process]$Process,
+        [string]$Kind = 'child',
+        [string]$Drive = ''
+    )
+
+    if ($null -eq $Process -or $Process.HasExited) { return }
+    $driveKey = if ([string]::IsNullOrWhiteSpace($Drive)) { '' } else { $Drive.Trim().TrimEnd(':').ToUpperInvariant() }
+    $key = '{0}:{1}:{2}' -f $Kind, $driveKey, $Process.Id
+    $script:ChildProcesses[$key] = [PSCustomObject]@{
+        Process = $Process
+        Kind    = $Kind
+        Drive   = $Drive
+    }
+}
+
+function Get-DescendantProcessIds {
+    param([int[]]$RootProcessIds)
+
+    $result = New-Object 'System.Collections.Generic.List[int]'
+    $pending = New-Object 'System.Collections.Generic.List[int]'
+    foreach ($rootId in @($RootProcessIds)) {
+        if ($rootId -gt 0) { [void]$pending.Add($rootId) }
+    }
+
+    $all = @()
+    try {
+        $all = @(Get-CimInstance Win32_Process -ErrorAction Stop |
+            Select-Object ProcessId, ParentProcessId)
+    }
+    catch {
+        return @()
+    }
+
+    while ($pending.Count -gt 0) {
+        $parentId = $pending[0]
+        $pending.RemoveAt(0)
+        foreach ($item in @($all | Where-Object { [int]$_.ParentProcessId -eq $parentId })) {
+            $childId = [int]$item.ProcessId
+            if ($childId -le 0 -or $result.Contains($childId)) { continue }
+            [void]$result.Add($childId)
+            [void]$pending.Add($childId)
+        }
+    }
+    return @($result)
+}
+
+function Unregister-ChildProcess {
+    param([System.Diagnostics.Process]$Process)
+
+    if ($null -eq $Process) { return }
+    foreach ($key in @($script:ChildProcesses.Keys)) {
+        $entry = $script:ChildProcesses[$key]
+        if ($null -ne $entry -and $null -ne $entry.Process -and $entry.Process.Id -eq $Process.Id) {
+            $script:ChildProcesses.Remove($key) | Out-Null
+        }
+    }
+}
+
+function Stop-TrackedChildProcesses {
+    param([string]$Reason = 'PowerShell đang thoát')
+
+    if ($script:ShutdownStarted) { return }
+    $script:ShutdownStarted = $true
+
+    $rootIds = @($script:ChildProcesses.Values | ForEach-Object {
+            if ($null -ne $_.Process) { [int]$_.Process.Id }
+        } | Where-Object { $_ -gt 0 } | Sort-Object -Unique)
+    if ($rootIds.Count -eq 0) { return }
+
+    $descendantIds = @(Get-DescendantProcessIds -RootProcessIds $rootIds)
+    $killIds = @($descendantIds + $rootIds | Sort-Object -Descending -Unique)
+    Write-Host ("[CLEANUP] {0}: đóng {1} process con..." -f $Reason, $killIds.Count) -ForegroundColor Yellow
+    foreach ($rootId in $rootIds) {
+        try {
+            # /T là fallback khi WMI/CIM không liệt kê được hết descendant process.
+            & taskkill.exe /PID ([int]$rootId) /T /F 2>$null | Out-Null
+        }
+        catch { }
+    }
+    foreach ($processId in $killIds) {
+        try {
+            Stop-Process -Id ([int]$processId) -Force -ErrorAction Stop
+        }
+        catch {
+            # Process có thể đã tự thoát trong lúc quét; không làm hỏng cleanup.
+        }
+    }
+    $script:ChildProcesses.Clear()
+}
+
+Register-EngineEvent -SourceIdentifier PowerShell.Exiting -SupportEvent -Action {
+    Stop-TrackedChildProcesses -Reason 'PowerShell.Exiting'
+} | Out-Null
+
+trap [System.Management.Automation.PipelineStoppedException] {
+    Stop-TrackedChildProcesses -Reason 'Ctrl+C/PipelineStopped'
+    break
+}
 
 # Chạy với quyền Administrator
 # Kiểm tra quyền admin
@@ -120,7 +229,9 @@ if (-not $script:IsAdmin) {
         $shellExe = if (Get-Command pwsh.exe -ErrorAction SilentlyContinue) { "pwsh.exe" } else { "powershell.exe" }
         $baseArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $scriptPath)
         # Chờ tiến trình elevated kết thúc để GUI/console cha không báo xong sớm.
-        Start-Process $shellExe -ArgumentList ($baseArgs + $allArgs) -Verb RunAs -Wait
+        $elevatedProcess = Start-Process $shellExe -ArgumentList ($baseArgs + $allArgs) -Verb RunAs -PassThru
+        Register-ChildProcess -Process $elevatedProcess -Kind 'elevated'
+        $elevatedProcess.WaitForExit()
         exit
     }
 }
@@ -1069,6 +1180,7 @@ Write-Host "CheckScriptPath : $CheckScriptPath"
 Write-Host "SortScriptPath  : $SortScriptPath"
 Write-Host "CheckAndSort    : $CheckAndSort"
 Write-Host "EnableCheck     : $EnableCheck"
+Write-Host "ForceFormatCard : $ForceFormatMemoryCard (threshold < $([Math]::Round($script:MemoryCardThresholdBytes / 1GB, 0))GB)"
 Write-Host "CheckDiskBefore : $($CheckDiskBeforeCopy.IsPresent)"
 Write-Host "FixDiskErrors   : $($FixDiskErrors.IsPresent)"
 Write-Host "DiskCheckScript : $DiskCheckScriptPath"
@@ -1315,17 +1427,21 @@ foreach ($drv in $ValidTargets) {
     $resumeCopy = $false
     $resumeMissingBytes = 0L
     $skipCopy = $false
+    $forceFormatThisDrive = $ForceFormatMemoryCard -and ($totalSize -lt $script:MemoryCardThresholdBytes)
 
     Write-Log ("--- ĐÁNH GIÁ Ổ {0} ---" -f $drv) -Drive $drv
     Write-Log ("Size={0:N2}GB, Free={1:N2}GB, Used={2:N2}MB ({3:P1})" -f `
         ($totalSize / 1GB), ($freeSpace / 1GB), $usedMB, $usedPct)
+    if ($forceFormatThisDrive) {
+        Write-Log ("[FORCE-FORMAT] {0} được nhận diện là thiết bị USB/thẻ nhớ dưới 64GB ({1:N2}GB). Sẽ bỏ qua resume/cleanup và format trước khi copy." -f $drv, ($totalSize / 1GB)) "WARN" -Drive $drv
+    }
 
     # *** BƯỚC 0: check capacity tổng có đủ chứa source không ***
     if ($totalSize -ge $sourceSize) {
 
         # BƯỚC 1: quyết định xử lý dữ liệu hiện có
         $skipCleanup = $false
-        if (-not $AutoYes -and $freeSpace -ge $sourceSize -and $usedMB -ge 20) {
+        if (-not $forceFormatThisDrive -and -not $AutoYes -and $freeSpace -ge $sourceSize -and $usedMB -ge 20) {
             Write-Host ""
             Write-Host ("Ổ {0} đang còn trống {1:N2}GB, đủ để chứa source ~{2:N2}GB." -f $drv, ($freeSpace / 1GB), ($sourceSize / 1GB)) -ForegroundColor Yellow
             $ansKeep = Read-Host "GIỮ NGUYÊN dữ liệu, KHÔNG xóa/format? (Y = giữ, giá trị khác = vẫn xóa/format)"
@@ -1335,7 +1451,7 @@ foreach ($drv in $ValidTargets) {
             }
         }
 
-        if ($usedMB -lt 20) {
+        if ($usedMB -lt 20 -and -not $forceFormatThisDrive) {
             Write-Log "Dữ liệu hiện tại trên ổ $drv < 20MB → giữ nguyên, chỉ copy thêm." -Drive $drv
             # Không đụng vào dữ liệu; freeSpace vẫn giữ giá trị hiện tại
         }
@@ -1344,7 +1460,7 @@ foreach ($drv in $ValidTargets) {
 
             $resumeCopy = $false
             $resumeMissingBytes = 0L
-            if ($EnableCheck -and -not $skipCleanup -and $usedPct -ge 0.2) {
+            if (-not $forceFormatThisDrive -and $EnableCheck -and -not $skipCleanup -and $usedPct -ge 0.2) {
                 $destPath = Join-Path $drv (Split-Path $SourceRoot -Leaf)
                 Write-Log ("[RESUME] Pre-format check on {0}..." -f $drv) "WARN" -Drive $drv
                 $resumeInfo = Invoke-PreFormatResumeCheck -DriveLetter $drv -DestPath $destPath
@@ -1376,7 +1492,7 @@ foreach ($drv in $ValidTargets) {
             if ($skipCleanup) {
                 Write-Log ("Bỏ qua xóa/format ổ {0} theo lựa chọn của người dùng." -f $drv) "WARN" -Drive $drv
             }
-            elseif ($usedPct -lt 0.2) {
+            elseif ($usedPct -lt 0.2 -and -not $forceFormatThisDrive) {
                 # OPTION A: xóa file
                 Write-Log ("Áp dụng OPTION A cho {0}: Xóa toàn bộ file (Used<{1:P0} dung lượng)." -f $drv, 0.2) -Drive $drv
                 try {
@@ -1398,9 +1514,19 @@ foreach ($drv in $ValidTargets) {
                 }
             }
             else {
+                if ($forceFormatThisDrive -and -not $AutoYes) {
+                    Write-Host ""
+                    Write-Host ("CẢNH BÁO: FORCE FORMAT sẽ xóa toàn bộ dữ liệu trên {0} ({1:N2}GB)." -f $drv, ($totalSize / 1GB)) -ForegroundColor Red
+                    $forceAnswer = Read-Host "Nhập Y để format ổ $drv, giá trị khác = bỏ qua ổ này"
+                    if (-not ($forceAnswer -and $forceAnswer.Trim().ToUpperInvariant() -eq 'Y')) {
+                        Write-Log ("[FORCE-FORMAT] Người dùng không xác nhận format ổ {0}; bỏ qua." -f $drv) "WARN" -Drive $drv
+                        continue
+                    }
+                }
                 $sizeMB = [double]($totalSize / 1MB)
                 $useFat16 = ($sizeMB -lt 4000)
-                $fsType = if ($useFat16) { "FAT" } else { "FAT32" }
+                $useExFat = $forceFormatThisDrive -and (-not $useFat16) -and ($totalSize -gt 32GB)
+                $fsType = if ($useFat16) { "FAT" } elseif ($useExFat) { "exFAT" } else { "FAT32" }
                 $clusterSize = if ($useFat16) { 16384 } else { 32768 }
                 if ($useFat16) {
                     $required = [Math]::Ceiling([double]$totalSize / 65525)
@@ -1416,8 +1542,8 @@ foreach ($drv in $ValidTargets) {
                 }
 
                 # Windows th??ng khong cho FAT32 > 32GB
-                if ((-not $useFat16) -and ($totalSize -gt 32GB)) {
-                    Write-Log ("? {0} > 32GB, th??ng khong format FAT32 ???c tren Windows. B? QUA ? nay." -f $drv) "ERROR" -Drive $drv
+                if ((-not $useFat16) -and (-not $useExFat) -and ($totalSize -gt 32GB)) {
+                    Write-Log ("Ổ {0} > 32GB, thường không format FAT32 được trên Windows. Bỏ qua ổ này." -f $drv) "ERROR" -Drive $drv
                     continue
                 }
 
@@ -1561,6 +1687,7 @@ function Start-CopyProcess {
 
     Write-Log ("Chạy robocopy tới {0}: robocopy {1}" -f $DriveLetter, ($params -join ' ')) -Drive $DriveLetter
     $p = Start-Process -FilePath "robocopy.exe" -ArgumentList ($params -join ' ') -PassThru -WindowStyle Hidden
+    Register-ChildProcess -Process $p -Kind 'robocopy' -Drive $DriveLetter
     return [PSCustomObject]@{
         Drive     = $DriveLetter
         Process   = $p
@@ -1885,6 +2012,7 @@ while ((@($active)).Count -gt 0) {
     foreach ($done in @($doneSet)) {
         $drv = $done.Drive
         $code = $done.Process.ExitCode
+        Unregister-ChildProcess -Process $done.Process
         $driveKey = Get-DriveKey $drv
         $abortInfo = $null
         if ($driveKey -and $script:CopyAbortReasons.ContainsKey($driveKey)) {
@@ -2037,6 +2165,7 @@ else {
 Write-Log "===== QUY TRÌNH HOÀN THÀNH ====="
 Write-Host ""
 Write-Host "Log file: $script:LogFile" -ForegroundColor Cyan
+Stop-TrackedChildProcesses -Reason 'kết thúc workflow'
 if ($overallExitCode -ne 0 -and -not $NoPause) {
     pause 
 }

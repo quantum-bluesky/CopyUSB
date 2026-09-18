@@ -23,3 +23,7 @@ USB đang mount. Dùng `uninstall_copyusb_context_menu.bat` để gỡ lệnh.
 Trong GUI, `Chế độ chạy` cho phép chọn `CopyWorkflow`, chỉ chạy
 `check_copy_hash`, chỉ chạy `Check-UsbDisk`, hoặc chỉ chạy `Mp3FatSort`.
 `HashLastN` chỉ bật khi `Enable check_copy_hash` được chọn.
+Checkbox `Force format USB/thẻ nhớ <64GB` bật `-ForceFormatMemoryCard`; thiết bị
+removable dưới 64GB sẽ được format trước khi copy (trên 32GB dùng exFAT).
+Khi dừng bằng `Ctrl+C`, đóng console PowerShell hoặc đóng GUI, process chạy và
+các process con sẽ được dọn theo cây PID.

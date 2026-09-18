@@ -119,6 +119,8 @@ Khi bật `Enable check_copy_hash`, trường `HashLastN` và `HashAlgorithm` đ
 - Chỉ cần chạy PowerShell Admin nếu dùng các chức năng cần quyền cao như format, fix filesystem hoặc bật `-RemountDrive 1`.
 - Dùng `-AutoYes` khi đã kiểm thử ổn định để chạy không cần canh prompt (khi đó sẽ tự động xóa / format ổ)
 - Mặc định chỉ dùng 1 thread copy duy nhất, theo như kinh nghiệm thực tế khi thread copy > 1 sẽ gặp nhiều lỗi copy & nhanh hỏng thẻ.
+- Với USB/thẻ nhớ removable dưới 64GB, có thể bật `-ForceFormatMemoryCard` để ép format trước khi copy; thiết bị trên 32GB sẽ dùng exFAT. Tùy chọn này xóa toàn bộ dữ liệu trên ổ, cần xác nhận nếu không dùng `-AutoYes`.
+- Khi nhấn `Ctrl+C`, đóng console PowerShell hoặc đóng GUI, master/GUI sẽ cố gắng dừng toàn bộ process con đang chạy (đặc biệt robocopy) theo cây process.
 
 Ví dụ bật check/fix thẻ nhớ trước khi copy:
 ```powershell
