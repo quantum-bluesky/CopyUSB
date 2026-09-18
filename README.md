@@ -3,6 +3,14 @@
 Xem hướng dẫn chi tiết ở HUONG_DAN_SU_DUNG.md
 Xem hướng dẫn test ở HUONG_DAN_TEST.md
 
+## Đóng gói, cài đặt và cập nhật
+
+Chạy `powershell -NoProfile -ExecutionPolicy Bypass -File .\Build-Distribution.ps1 -Version 1.0.0`
+để tạo ZIP trong `dist`. Máy đích giải nén rồi bấm `Install.cmd`; mỗi bản cập nhật
+dùng cùng thao tác. Xem [hướng dẫn cài đặt](distribution/HUONG_DAN_CAI_DAT.md).
+Gói mặc định không kèm YAFS Debug hiện có; dùng `-YafsDirectory` với bản Release
+để đóng gói đầy đủ chức năng sắp xếp FAT.
+
 ## Giao diện Windows và context menu
 
 Chạy `CopyUSB-GUI.ps1` để mở GUI với đầy đủ tham số của

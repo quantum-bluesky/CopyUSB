@@ -48,7 +48,7 @@
 param(
   [Parameter(ParameterSetName = "Run")]
   [Parameter(ParameterSetName = "InstallYafs")]
-  [string]$YafsPath = "C:\Tools\yafs\yafs.exe",
+  [string]$YafsPath = (Join-Path $PSScriptRoot 'tools\yafs\yafs.exe'),
 
   [Parameter(Mandatory = $true, ParameterSetName = "Run")]
   [string[]]$Device,
