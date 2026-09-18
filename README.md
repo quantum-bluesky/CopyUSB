@@ -8,11 +8,16 @@ Xem hướng dẫn test ở HUONG_DAN_TEST.md
 Chạy `powershell -NoProfile -ExecutionPolicy Bypass -File .\Build-Distribution.ps1 -Version 1.0.0`
 để tạo ZIP trong `dist`. Máy đích giải nén rồi bấm `Install.cmd`; mỗi bản cập nhật
 dùng cùng thao tác. Xem [hướng dẫn cài đặt](distribution/HUONG_DAN_CAI_DAT.md).
-Để build YAFS Release và đóng gói đầy đủ, bấm `Build-CopyUSB.cmd` hoặc chạy
-`powershell -NoProfile -ExecutionPolicy Bypass -File .\Build-CopyUSB.ps1 -Version 1.1.0`.
-Bản x86 mặc định liên kết tĩnh Xerces và C++ runtime, không cần DLL Debug trên máy
-người dùng. Xem [hướng dẫn build YAFS](distribution/yafs/README.md).
-`Build-Distribution.ps1` vẫn tạo gói Core nếu không truyền `-YafsDirectory`.
+`Build-CopyUSB.cmd` / `Build-CopyUSB.ps1` chỉ đóng gói app, không build YAFS.
+Không truyền `-YafsDirectory` sẽ tạo gói Core. Để kèm YAFS đã build:
+
+```powershell
+.\Build-CopyUSB.ps1 -Version 1.1.1 -YafsDirectory D:\Source\yafs\dist\1.2.0-x86
+```
+
+Build YAFS riêng tại repo `yafs` bằng `Build-Yafs.ps1`; repo đó chứa sẵn mã nguồn
+Xerces và hướng dẫn `BUILD_WINDOWS.md`. Máy đóng gói CopyUSB không cần Visual Studio
+hay CMake. Một bản YAFS có thể dùng lại cho nhiều bản CopyUSB.
 
 ## Giao diện Windows và context menu
 

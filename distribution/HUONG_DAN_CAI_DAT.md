@@ -56,11 +56,21 @@ Gỡ cài: dùng Register-CopyUSBContextMenu.ps1 trong phiên bản đang cài v
 
 Bản đã cài tại đường dẫn cũ `%LOCALAPPDATA%\Programs\CopyUSB` vẫn được cập nhật tại đó nếu đọc được `current.txt`. Nếu không tạo được shortcut/menu, installer báo cảnh báo và in lệnh mở ứng dụng thủ công; ứng dụng vẫn được cài. Khi lỗi cài đặt, thông báo ghi rõ bước và đường dẫn.
 
-## Build gói đầy đủ có YAFS
+## Đóng gói với YAFS đã build riêng
 
-Từ mã nguồn, chạy `powershell -NoProfile -ExecutionPolicy Bypass -File .\Build-CopyUSB.ps1 -Version 1.1.0`
-(hoặc bấm Build-CopyUSB.cmd). Máy build cần Visual Studio 2022 C++, Windows SDK,
-CMake và nguồn Xerces. Máy sử dụng không cần cài các công cụ này: YAFS mới liên kết
-tĩnh Xerces và C++ runtime. Bản x86 mặc định dùng chung trên Windows x86/x64.
-Bản Debug trong tools/yafs chỉ là bản cũ; script mới build vào dist/yafs và không
-chép DLL Debug vào gói. Mã nguồn tương ứng và license nằm cùng YAFS trong source.zip.
+Build YAFS thực hiện độc lập ở repo YAFS, có sẵn `Build-Yafs.ps1`, `CMakeLists.txt`
+và `third_party/xerces-c-3.3.0`. Ví dụ tại repo YAFS:
+
+```powershell
+.\Build-Yafs.ps1 -Version 1.2.0
+```
+
+Sau đó tại repo CopyUSB:
+
+```powershell
+.\Build-CopyUSB.ps1 -Version 1.1.1 -YafsDirectory .\yafs\dist\1.2.0-x86
+```
+
+CopyUSB chỉ đóng gói bản YAFS đã có, không gọi compiler. Bước đóng gói CopyUSB không
+cần Visual Studio, CMake hay nguồn Xerces. Không truyền `-YafsDirectory` sẽ tạo gói
+Core. Bản YAFS mới liên kết tĩnh; giữ source.zip, license và NOTICE trong gói.

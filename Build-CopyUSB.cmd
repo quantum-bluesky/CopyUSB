@@ -6,5 +6,5 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-echo Full CopyUSB package is ready in the dist folder.
+echo CopyUSB package is ready. YAFS compilation is a separate step.
 pause
