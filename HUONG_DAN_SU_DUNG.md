@@ -87,8 +87,9 @@ GUI có các chế độ chạy độc lập:
   định `SyncMode=Mirror` dùng robocopy `/MIR` để xóa file/thư mục dư ở đích;
   chọn `UpdateOnly` nếu muốn giữ file dư. Trước khi sync, flow chọn các file
   cuối ở đích có tổng dung lượng tối thiểu bằng nhóm sync, đồng thời loại các
-  file sẽ bị `Mirror` xóa; sau đó hash cả hai nhóm để phát hiện trường hợp thẻ
-  nhớ bị ghi đè vòng.
+  file sẽ bị `Mirror` xóa. Sau sync, manifest hash được cập nhật để gồm file dự
+  kiến đồng bộ, file thực tế đã thay đổi trên đích và nhóm cuối thẻ, nhằm phát
+  hiện trường hợp thẻ nhớ bị ghi đè vòng.
   Khi kết thúc, console chờ Enter để xem log; dùng `-NoPause` nếu muốn tự động thoát.
 - `CheckCopyHash`: chỉ chạy `check_copy_hash.ps1`.
 - `CheckUsbDisk`: chỉ chạy `Check-UsbDisk.ps1`, có thể bật `Fix lỗi disk`.

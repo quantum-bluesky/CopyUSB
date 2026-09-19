@@ -1880,7 +1880,73 @@ function Get-SyncChangedRelPaths {
             continue
         }
         $destFile = $destMap[$key]
-        if ($file.Length -ne $destFile.Length -or $file.LastWriteTimeUtc -gt $destFile.LastWriteTimeUtc) {
+        if ($file.Length -ne $destFile.Length -or $file.LastWriteTimeUtc -ne $destFile.LastWriteTimeUtc -or $file.Attributes -ne $destFile.Attributes) {
+            [void]$changed.Add($rel)
+        }
+    }
+    return @($changed | Sort-Object -Unique)
+}
+
+function Get-SyncDestinationSnapshot {
+    param(
+        [Parameter(Mandatory)]
+        [string]$DriveLetter
+    )
+
+    $sourceFull = (Resolve-Path -LiteralPath $SourceRoot).ProviderPath
+    $destRoot = Join-Path $DriveLetter (Split-Path $sourceFull -Leaf)
+    $snapshot = @{}
+    if (-not (Test-Path -LiteralPath $destRoot -PathType Container)) {
+        return $snapshot
+    }
+
+    $destFull = (Resolve-Path -LiteralPath $destRoot).ProviderPath
+    foreach ($file in @(Get-ChildItem -LiteralPath $destFull -Filter '*.mp3' -Recurse -File -Force -ErrorAction Stop)) {
+        $rel = $file.FullName.Substring($destFull.Length).TrimStart('\\')
+        $snapshot[$rel.ToLowerInvariant()] = [PSCustomObject]@{
+            RelativePath     = $rel
+            Length           = [int64]$file.Length
+            LastWriteUtcTicks = [int64]$file.LastWriteTimeUtc.Ticks
+            Attributes       = [int]$file.Attributes
+        }
+    }
+    return $snapshot
+}
+
+function Get-SyncActuallyChangedRelPaths {
+    param(
+        [Parameter(Mandatory)]
+        [string]$DriveLetter,
+        [Parameter(Mandatory)]
+        [hashtable]$BeforeSnapshot
+    )
+
+    $sourceFull = (Resolve-Path -LiteralPath $SourceRoot).ProviderPath
+    $destRoot = Join-Path $DriveLetter (Split-Path $sourceFull -Leaf)
+    if (-not (Test-Path -LiteralPath $destRoot -PathType Container)) { return @() }
+    $destFull = (Resolve-Path -LiteralPath $destRoot).ProviderPath
+
+    $sourceKeys = @{}
+    foreach ($file in @(Get-ChildItem -LiteralPath $sourceFull -Filter '*.mp3' -Recurse -File -Force -ErrorAction Stop)) {
+        $rel = $file.FullName.Substring($sourceFull.Length).TrimStart('\\')
+        $sourceKeys[$rel.ToLowerInvariant()] = $true
+    }
+
+    $changed = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($file in @(Get-ChildItem -LiteralPath $destFull -Filter '*.mp3' -Recurse -File -Force -ErrorAction Stop)) {
+        $rel = $file.FullName.Substring($destFull.Length).TrimStart('\\')
+        $key = $rel.ToLowerInvariant()
+        if (-not $sourceKeys.ContainsKey($key)) { continue }
+
+        if (-not $BeforeSnapshot.ContainsKey($key)) {
+            [void]$changed.Add($rel)
+            continue
+        }
+
+        $before = $BeforeSnapshot[$key]
+        if ([int64]$file.Length -ne [int64]$before.Length -or
+            [int64]$file.LastWriteTimeUtc.Ticks -ne [int64]$before.LastWriteUtcTicks -or
+            [int]$file.Attributes -ne [int]$before.Attributes) {
             [void]$changed.Add($rel)
         }
     }
@@ -2019,6 +2085,7 @@ function Invoke-SyncWorkflow {
     foreach ($drv in $Targets) {
         try {
             $changedPaths = @(Get-SyncChangedRelPaths -DriveLetter $drv)
+            $beforeSnapshot = Get-SyncDestinationSnapshot -DriveLetter $drv
             $tailPlan = Get-SyncTailPlan -DriveLetter $drv -SyncPaths $changedPaths
             $manifestPaths = @((@($changedPaths) + @($tailPlan.TailPaths)) | Sort-Object -Unique)
             $manifestPath = New-SyncManifest -DriveLetter $drv -RelativePaths $manifestPaths
@@ -2038,6 +2105,19 @@ function Invoke-SyncWorkflow {
             continue
         }
         Write-Log ("SYNC {0} hoàn tất (ExitCode={1}): {2}" -f $drv, $syncResult.Code, $syncResult.Message) -Drive $drv
+
+        try {
+            $actuallySyncedPaths = @(Get-SyncActuallyChangedRelPaths -DriveLetter $drv -BeforeSnapshot $beforeSnapshot)
+            $manifestPaths = @((@($changedPaths) + @($actuallySyncedPaths) + @($tailPlan.TailPaths)) | Sort-Object -Unique)
+            $manifestPath = New-SyncManifest -DriveLetter $drv -RelativePaths $manifestPaths
+            Write-Log ("SYNC {0}: cập nhật manifest sau sync: dự kiến={1}, thực tế thay đổi={2}, tail safety={3}, tổng check hash={4} file." -f `
+                $drv, $changedPaths.Count, $actuallySyncedPaths.Count, @($tailPlan.TailPaths).Count, $manifestPaths.Count) -Drive $drv
+        }
+        catch {
+            Write-Log ("SYNC {0}: không cập nhật được manifest sau sync: {1}" -f $drv, $_.Exception.Message) 'ERROR' -Drive $drv
+            $errors[$drv] = "Không cập nhật được manifest sau sync: $($_.Exception.Message)"
+            continue
+        }
 
         $flowResult = Invoke-PostCopyFlow -DriveLetter $drv -OnlyFilesPath $manifestPath -ForceHash -ForceSort -ForceAllHash -SkipEjectAfterFlow
         if (-not $flowResult.Success) {
